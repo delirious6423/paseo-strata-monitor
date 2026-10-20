@@ -16,7 +16,8 @@
     "server",
     "shared",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets"
   ],
   "devDependencies": {
     "@getpaseo/plugin": "0.12.0",

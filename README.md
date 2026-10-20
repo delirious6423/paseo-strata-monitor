@@ -1,6 +1,6 @@
 # Strata monitor for Paseo
 
-A [Paseo](https://paseo.sh) plugin that shows live status of a local Strata inference server: an always-visible sidebar row with prefill and decode tok/s, and a detail screen with a speed graph, queue, GPU/RAM use and recent requests.
+A [Paseo](https://paseo.sh) plugin that shows live status of a local [Strata](https://github.com/niko1221/strata) inference server: an always-visible sidebar row with prefill and decode tok/s, and a detail screen with a speed graph, queue, GPU/RAM use and recent requests.
 
 ## Install
 
@@ -26,5 +26,7 @@ npm install
 npm run typecheck
 npm test
 ```
+
+![Strata monitor screenshot](assets/screenshot.png)
 
 MIT licensed.
