@@ -1,0 +1,8 @@
+{
+  "id": "strata-monitor",
+  "name": "Strata monitor",
+  "description": "Live Strata inference server status in Paseo: sidebar prefill/decode tok/s and a detail screen",
+  "requirements": {
+    "paseo": ">=0.12.0"
+  }
+}
