@@ -282,6 +282,7 @@ export function speedChange(before: Record<string, any>, after: Record<string, a
     for (const p of Array.isArray(x?.phases) ? x.phases : []) {
       if (!p || p.kind === "warmup" || typeof p.output_tok_s !== "number" || p.output_tok_s <= 0) continue;
       const e = m.get(p.kind) ?? { vals: [] as number[], workers: p.client_workers as unknown };
+      if (e.workers !== p.client_workers) return new Map(); // phases of one kind with different concurrency: not comparable
       e.vals.push(p.output_tok_s);
       m.set(p.kind, e);
     }
@@ -293,7 +294,7 @@ export function speedChange(before: Record<string, any>, after: Record<string, a
   return [...byKind(before)].flatMap(([kind, b]) => {
     const now = a.get(kind);
     if (!now) return [];
-    if (now.vals.length !== b.vals.length) return []; // not the same workload: no comparison
+    if (now.vals.length !== b.vals.length || now.workers !== b.workers) return []; // not the same workload: no comparison
     const old = mean(b.vals), cur = mean(now.vals);
     const pct = 100 * (cur / old - 1);
     const seenSpread = Math.max(spread(b.vals), spread(now.vals));
@@ -429,13 +430,17 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
           job.details.push(`Speed after: not measured (${String(e.message ?? e).slice(0, 120)})`);
           return null;
         });
-        if (after) job.details.push(...speedChange(before.summary, after.summary).map((l) => `Speed vs before: ${l}`));
+        if (after) {
+          const lines = speedChange(before.summary, after.summary);
+          job.details.push(...lines.map((l) => `Speed vs before: ${l}`));
+          if (lines.length) job.details.push("A rough check: the same quick benchmark a few minutes apart, not a controlled test");
+        }
         else if (r.cancel) job.details.push("Speed after: not measured (cancelled or stopped)");
       } else if (rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
     } catch (e) {
       job.details.push(`Not started again: ${String((e as Error).message ?? e).slice(0, 150)}`);
     }
-    if (rep.state === "done") job.pct = 100;
+    finish(); // the tune's own state; a Cancel here only skipped the measurement
   });
 }
 

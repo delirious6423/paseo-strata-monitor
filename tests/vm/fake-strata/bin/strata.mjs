@@ -124,6 +124,8 @@ if (a[0] === "bench" && a[1] === "run") {
 }
 if (a[0] === "tune" && a[1] === "auto") {
   const status = arg("--status-file");
+  // A tune that fails (Strata exits 6, e.g. the engine under test would not start), when the test asks for one.
+  if (existsSync(join(homedir(), ".fake-strata-tune-fails"))) out({ ok: true, result: { outcome: "failed", message: "the engine under test did not start" } }, 6);
   const planned = 8;
   for (let i = 0; i <= planned; i++) {
     writeFileSync(status, JSON.stringify({ state: "running", stage: "round", message: `Round ${i} of ${planned}`, runs_done: i,

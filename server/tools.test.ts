@@ -195,6 +195,8 @@ test("before/after speed: mean of the repeats per kind; changes inside the runs'
   assert.deepEqual(speedChange(run([60], [50]), run([72], [51])), ["One request: 60.0 → 72.0 tok/s (+20.0%)", "4 at once: 50.0 → 51.0 tok/s (+2.0%, no clear change: under 10%, how much runs of the same settings differed here)"]);
   // Repeats that scatter widely widen the band: 20% apart is not called a change.
   assert.match(speedChange(run([50, 70], [1]), run([66, 74], [1]))[0]!, /\+16\.7%, no clear change: these runs varied by 33%/);
+  // Different concurrency is a different workload: not compared.
+  assert.deepEqual(speedChange(run([], [60]), { phases: [{ kind: "mixed", client_workers: 8, output_tok_s: 90 }] }), []);
   // A different number of repeats is a different workload: not compared.
   assert.deepEqual(speedChange(run([60, 61, 62], []), run([70], [])), []);
   // A kind missing on one side, or no numbers, is left out rather than compared wrongly.

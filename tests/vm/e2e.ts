@@ -3,7 +3,7 @@
 // (Strata settings file, an install elsewhere, GGUF files; on Linux also a user systemd template unit), with
 // the fake Strata CLI/server from fake-strata/. Prints PASS/FAIL per check; exit code = number of failures.
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -196,6 +196,14 @@ check("Cancel during autotune's restart: tune result kept, after-measurement ski
   /Faster settings/.test(job.outcome ?? "") && job.details.some((d) => /Speed after: not measured|Not started again/.test(d)), job);
 await loadEngine(tinyId).catch(() => {});
 await until(tinyId, "ready", 30);
+
+// A tune that fails on a running model ends failed (not done), and the model is started again.
+writeFileSync(join(homedir(), ".fake-strata-tune-fails"), "");
+await startTune(tinyId, "quick");
+job = await waitJob(120);
+rmSync(join(homedir(), ".fake-strata-tune-fails"));
+check("a failed autotune of a running model ends failed, and the model runs again", job?.state === "failed" &&
+  /did not start/.test(job.error ?? "") && (await state(tinyId)) === "ready", [job, await state(tinyId)]);
 
 // ---------------------------------------------------------------- saved tuning, re-check, server log
 let ps = await presetStatus(tinyId);

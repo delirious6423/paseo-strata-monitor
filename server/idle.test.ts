@@ -19,7 +19,7 @@ function world(s: () => Snapshot | null) {
       return v;
     },
     url: async () => "http://127.0.0.1:8080",
-    stop: async (id) => (stopped.push(id), true),
+    stop: async (id, _limit, still) => (still() ? (stopped.push(id), true) : false),
     busy: () => busy,
   };
   return { deps, stopped, setBusy: (b: boolean) => (busy = b) };
@@ -105,4 +105,19 @@ test("idle stop: the setting switched off during a look stops nothing", async ()
   const deps: IdleDeps = { ...w.deps, snapshot: async () => (configureIdle(0), snap(3)) };
   assert.equal(await idleTick(5 * MIN, deps), null);
   assert.deepEqual(w.stopped, []);
+});
+
+test("idle stop: a tool that starts while the stop is being prepared keeps its model", async () => {
+  configureIdle(1);
+  let busy = false;
+  const w = world(() => snap(3));
+  const deps: IdleDeps = { ...w.deps, busy: () => busy,
+    stop: async (id, limit, still) => {
+      busy = true; // a Benchmark claims the model while the stop looks it up
+      return w.deps.stop(id, limit, still);
+    } };
+  await idleTick(0, deps);
+  assert.equal(await idleTick(5 * MIN, deps), null);
+  assert.deepEqual(w.stopped, []);
+  configureIdle(0);
 });

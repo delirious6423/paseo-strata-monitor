@@ -21,13 +21,15 @@ const real = {
   /** The model's own server root: the snapshot must be of exactly this server (not another one on its port). */
   url: async (id: string) => serverUrl(await findModel(id)),
   snapshot: () => getSnapshot(),
-  /** Stop, wait until it is really stopped, then record it. False if it did not stop. */
-  stop: async (id: string, limit: number) => {
+  /** Stop if `still()` holds right before (nothing awaited between that check and the stop starting, so no tool
+   * can claim the model in between), wait until it is really stopped, then record it. False if not stopped. */
+  stop: async (id: string, limit: number, still: () => boolean) => {
     const f = await findModel(id);
+    if (!still()) return false;
     await stopEngine(id);
     for (let i = 0; i < 50; i++) {
       await new Promise((ok) => setTimeout(ok, 2000));
-      const e = (await listEngines(true)).engines.find((x) => x.id === id);
+      const e = (await listEngines()).engines.find((x) => x.id === id); // state only; no rediscovery
       if (e?.state === "stopped" || e?.state === "failed") {
         await recordIdleStop(f, limit);
         return true;
@@ -48,6 +50,7 @@ const origin = (u: string) => {
 };
 
 let ticking = false;
+let epoch = 0; // bumped by stopIdle (unload): a look still running then stops nothing
 
 /** One look; exported for the tests (`now` and the inputs are injectable). Returns the id it stopped, if any.
  * Looks never overlap; the setting and the tools are checked again right before stopping. */
@@ -63,6 +66,7 @@ export async function idleTick(now = Date.now(), deps: IdleDeps = real): Promise
 
 async function look(now: number, deps: IdleDeps): Promise<string | null> {
   const limit = minutes;
+  const started = epoch;
   if (limit <= 0 || deps.busy()) {
     seen.clear(); // a tool or a change of setting starts the count again
     return null;
@@ -85,8 +89,10 @@ async function look(now: number, deps: IdleDeps): Promise<string | null> {
     }
     if (now - s.lastActiveMs < limit * 60_000) continue;
     seen.delete(e.id);
-    if (minutes !== limit || deps.busy()) return null; // the setting changed, or a tool started, during this look
-    return (await deps.stop(e.id, limit)) ? e.id : null;
+    // The setting changed, a tool started or the plugin unloaded during this look: stop nothing.
+    const still = () => minutes === limit && epoch === started && !deps.busy();
+    if (!still()) return null;
+    return (await deps.stop(e.id, limit, still)) ? e.id : null;
   }
   return null;
 }
@@ -99,5 +105,6 @@ export function startIdle() {
 export function stopIdle() {
   if (timer) clearInterval(timer);
   timer = null;
+  epoch++;
   seen.clear();
 }
