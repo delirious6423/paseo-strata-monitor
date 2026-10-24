@@ -184,8 +184,18 @@ const blocked = await loadEngine(bigId).then(() => "", (e) => String(e.message))
 check("autotune measures, stops the running model, and blocks Load", (await state(tinyId)) === "stopped" && /Autotune is running/.test(blocked), [await state(tinyId), blocked]);
 job = await waitJob(120);
 check("autotune result, speed before and after, and the model runs again", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") &&
-  job.details.some((d) => /every start/.test(d)) && job.details.some((d) => /^Speed: One request: 42\.5 → 42\.5 tok\/s/.test(d)) &&
+  job.details.some((d) => /every start/.test(d)) && job.details.some((d) => /^Speed vs before: One request: 42\.5 → 42\.5 tok\/s/.test(d)) &&
   (await state(tinyId)) === "ready", [job, await state(tinyId)]);
+
+// Cancel while autotune starts the model again: the tune's result stays, only the measurement is skipped.
+await startTune(tinyId, "quick");
+for (let i = 0; i < 240 && !/Starting the model again|Speed after/.test((await toolsStatus()).job?.message ?? ""); i++) await sleep(500);
+await cancelJob();
+job = await waitJob(60);
+check("Cancel during autotune's restart: tune result kept, after-measurement skipped", job?.kind === "tune" && job.state === "done" &&
+  /Faster settings/.test(job.outcome ?? "") && job.details.some((d) => /Speed after: not measured|Not started again/.test(d)), job);
+await loadEngine(tinyId).catch(() => {});
+await until(tinyId, "ready", 30);
 
 // ---------------------------------------------------------------- saved tuning, re-check, server log
 let ps = await presetStatus(tinyId);

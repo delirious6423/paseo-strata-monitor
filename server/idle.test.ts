@@ -18,7 +18,8 @@ function world(s: () => Snapshot | null) {
       if (!v) throw new Error("unreachable");
       return v;
     },
-    stop: async (id) => void stopped.push(id),
+    url: async () => "http://127.0.0.1:8080",
+    stop: async (id) => (stopped.push(id), true),
     busy: () => busy,
   };
   return { deps, stopped, setBusy: (b: boolean) => (busy = b) };
@@ -72,4 +73,36 @@ test("idle stop: off, or a running tool, never stops anything", async () => {
   assert.equal(await idleTick(507 * MIN, w.deps), "m");
   assert.deepEqual(w.stopped, ["m"]);
   configureIdle(0);
+});
+
+test("idle stop: a tool started during the look keeps its model", async () => {
+  configureIdle(1);
+  const w = world(() => snap(3));
+  await idleTick(0, w.deps);
+  let looks = 0;
+  const deps: IdleDeps = { ...w.deps, busy: () => ++looks > 1 }; // free at the start of the look, busy just before the stop
+  assert.equal(await idleTick(2 * MIN, deps), null);
+  assert.deepEqual(w.stopped, []);
+  configureIdle(0);
+});
+
+test("idle stop: another server on the same port, or a missing counter, never stops the local model", async () => {
+  configureIdle(1);
+  for (const s of [snap(3, "idle", 0, "http://10.0.0.9:8080"), { ...snap(3), totals: { requests: null } } as unknown as Snapshot,
+    { ...snap(3), queued: null } as unknown as Snapshot]) {
+    const w = world(() => s);
+    await idleTick(0, w.deps);
+    assert.equal(await idleTick(5 * MIN, w.deps), null, JSON.stringify(s));
+    assert.deepEqual(w.stopped, []);
+  }
+  configureIdle(0);
+});
+
+test("idle stop: the setting switched off during a look stops nothing", async () => {
+  configureIdle(1);
+  const w = world(() => snap(3));
+  await idleTick(0, w.deps);
+  const deps: IdleDeps = { ...w.deps, snapshot: async () => (configureIdle(0), snap(3)) };
+  assert.equal(await idleTick(5 * MIN, deps), null);
+  assert.deepEqual(w.stopped, []);
 });

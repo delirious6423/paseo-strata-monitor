@@ -41,7 +41,18 @@ export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styl
   });
   const check = useMutation({ mutationFn: (preset: string) => recheck({ id: sel.id, preset }),
     onSettled: () => void client.invalidateQueries({ queryKey: ["strata-tools"] }) });
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // Delete and Re-check (it stops the running model) need a second press, like Autotune.
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const twice = (what: string, run: () => void) => {
+    if (confirm !== what) return setConfirm(what);
+    setConfirm(null);
+    run();
+  };
+  useEffect(() => {
+    if (!confirm) return;
+    const t = setTimeout(() => setConfirm(null), 6000);
+    return () => clearTimeout(t);
+  }, [confirm]);
 
   if (sel.keepsTuning === false) return null; // the warning above already says a tune is not used
   const active = data?.presets.find((p) => p.active) ?? null;
@@ -65,7 +76,7 @@ export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styl
           <Text style={{ color: c.foreground, fontSize: 13 }}>
             {p.active ? "● " : "○ "}
             {p.name}
-            {p.gainPct !== null ? ` · ${p.gainPct >= 0 ? "+" : ""}${p.gainPct.toFixed(1)}%` : ""}
+            {p.gainPct !== null ? ` · ${p.gainPct >= 0 ? "+" : ""}${p.gainPct.toFixed(1)}% vs standard` : ""}
             {p.decodeTokS !== null ? ` · ${p.decodeTokS.toFixed(1)} tok/s` : ""}
           </Text>
           {p.notice || p.created ? (
@@ -75,12 +86,10 @@ export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styl
           ) : null}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
             {!p.active ? link(theme, "Use this one", () => act.mutate({ action: "apply", preset: p.id }), { disabled: act.isPending || busy }) : null}
-            {link(theme, "Re-check (~2 min, stops the model)", () => check.mutate(p.id), { disabled: check.isPending || busy })}
-            {link(theme, confirmDelete === p.id ? "Press again to delete" : "Delete", () => {
-              if (confirmDelete !== p.id) return setConfirmDelete(p.id);
-              setConfirmDelete(null);
-              act.mutate({ action: "delete", preset: p.id });
-            }, { disabled: act.isPending || busy, danger: true })}
+            {link(theme, confirm === `recheck:${p.id}` ? "Press again: stops the model, ~2 min" : "Re-check",
+              () => twice(`recheck:${p.id}`, () => check.mutate(p.id)), { disabled: check.isPending || busy })}
+            {link(theme, confirm === `delete:${p.id}` ? "Press again to delete" : "Delete",
+              () => twice(`delete:${p.id}`, () => act.mutate({ action: "delete", preset: p.id })), { disabled: act.isPending || busy, danger: true })}
           </View>
         </View>
       ))}

@@ -167,6 +167,7 @@ const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update", 
 async function startJob(kind: Job["kind"], modelId: string | null, prepare: () => Promise<Found | null>,
     body: (r: Run, f: Found | null, poll: Poll) => Promise<void>) {
   if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
+  if (presetChanging && (kind === "tune" || kind === "recheck")) throw new Error("Saved tuning is being changed; try again in a moment");
   const job: Job = {
     id: Date.now().toString(36), kind, modelId, model: null, // the model from the press: Stop finds it while preparing
     startedMs: Date.now(), endedMs: null, state: "running", pct: null, message: "Starting…", minutesLeft: null,
@@ -238,10 +239,11 @@ export function benchLines(summary: Record<string, any>): string[] {
       (p.failed ? `, ${p.failed} failed` : ""));
 }
 
-// Stop on the benchmarked model cancels the benchmark and waits for it to end (Ctrl+C, then a kill after 30 s).
+// Stop on a model a benchmark (or autotune's before/after measurement) is using cancels that job first and waits
+// for it to end (Ctrl+C, then a kill after 30 s). For autotune after its tune, that only skips the measurement.
 setBeforeStop(async (id) => {
   const r = run;
-  if (!r || r.job.kind !== "bench" || r.job.modelId !== id) return;
+  if (!r || (r.job.kind !== "bench" && r.job.kind !== "tune") || r.job.modelId !== id) return;
   await cancelJob().catch(() => {});
   for (let i = 0; i < 350 && run === r; i++) await new Promise((ok) => setTimeout(ok, 100));
   if (run === r) throw new Error("The benchmark of this model is still stopping; try again in a moment");
@@ -291,11 +293,16 @@ export function speedChange(before: Record<string, any>, after: Record<string, a
   return [...byKind(before)].flatMap(([kind, b]) => {
     const now = a.get(kind);
     if (!now) return [];
+    if (now.vals.length !== b.vals.length) return []; // not the same workload: no comparison
     const old = mean(b.vals), cur = mean(now.vals);
     const pct = 100 * (cur / old - 1);
-    const noise = Math.max(10, spread(b.vals), spread(now.vals));
+    const seenSpread = Math.max(spread(b.vals), spread(now.vals));
+    const noise = Math.max(10, seenSpread);
     const name = kind === "serial" ? "One request" : kind === "mixed" ? `${b.workers ?? "Several"} at once` : kind;
-    const verdict = Math.abs(pct) < noise ? `no clear change, runs vary by ±${(noise / 2).toFixed(0)}%` : `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    const sign = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    const verdict = Math.abs(pct) >= noise ? sign
+      : seenSpread > 10 ? `${sign}, no clear change: these runs varied by ${seenSpread.toFixed(0)}%`
+      : `${sign}, no clear change: under 10%, how much runs of the same settings differed here`;
     return [`${name}: ${n(old)} → ${n(cur)} tok/s (${verdict})`];
   });
 }
@@ -304,7 +311,9 @@ export function speedChange(before: Record<string, any>, after: Record<string, a
  * start are slow: 41.6 against 66-73 tok/s steady here), then 3 repeats. */
 async function measure(r: Run, f: Found, install: string, poll: Poll, label: string): Promise<BenchRun | null> {
   if (!(await runBench(r, f, install, poll, `${label}warming up · `, false))) return null;
-  return runBench(r, f, install, poll, label, false, 3);
+  const b = await runBench(r, f, install, poll, label, false, 3);
+  if (b && !b.ok) throw new Error("some benchmark requests failed, so it is not a fair measurement");
+  return b;
 }
 
 export async function startBench(id: string) {
@@ -396,17 +405,33 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
     const saved = named ?? (presetsBefore && presetsAfter ? [...presetsAfter].filter(([k]) => !presetsBefore.has(k)).map(([, v]) => v) : null);
     const rep = tuneReport(result, x.code, cancelled, saved);
     const measured = job.details;
-    Object.assign(job, rep, { details: [...rep.details, ...measured], pct: rep.state === "done" ? 99 : job.pct });
-    if (rep.state === "failed" && !rep.error) job.error = why(x, lastJson(x.lines));
-    if (!wasReady) return void (rep.state === "done" && job.details.push("Load the model and press Benchmark to measure it with the new settings"));
-    if (cancelled || r.cancel) return void job.details.push("The model was stopped for autotune; press Load to start it again");
+    // The tune's result is shown now; the job stays running (and cancellable) while the model is started again
+    // and measured, and takes the tune's final state at the end.
+    Object.assign(job, rep, { state: "running", details: [...rep.details, ...measured], pct: rep.state === "done" ? 99 : job.pct });
+    if (rep.state === "failed" && !rep.error) rep.error = job.error = why(x, lastJson(x.lines));
+    const finish = () => void Object.assign(job, { state: rep.state, ...(rep.state === "done" ? { pct: 100 } : {}) });
+    if (!wasReady) {
+      if (rep.state === "done") job.details.push("Load the model and press Benchmark to measure it with the new settings");
+      return finish();
+    }
+    if (cancelled || r.cancel) {
+      job.details.push("The model was stopped for autotune; press Load to start it again");
+      return finish();
+    }
     // Put the model back the way it was, now with the saved tuning, and measure again.
     job.message = "Starting the model again";
     try {
       await loadForTool(id, () => r.cancel);
-      const after = before && rep.state === "done" ? await measure(r, f, install, poll, "Speed after: ") : null;
-      if (before && after) job.details.push(...speedChange(before.summary, after.summary).map((l) => `Speed: ${l}`));
-      else if (rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
+      if (before && rep.state === "done") {
+        // Compared with the settings that ran before (the previous preset, if any); Strata's own gain is against
+        // the standard settings, so the two can differ.
+        const after = await measure(r, f, install, poll, "Speed after: ").catch((e) => {
+          job.details.push(`Speed after: not measured (${String(e.message ?? e).slice(0, 120)})`);
+          return null;
+        });
+        if (after) job.details.push(...speedChange(before.summary, after.summary).map((l) => `Speed vs before: ${l}`));
+        else if (r.cancel) job.details.push("Speed after: not measured (cancelled or stopped)");
+      } else if (rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
     } catch (e) {
       job.details.push(`Not started again: ${String((e as Error).message ?? e).slice(0, 150)}`);
     }
@@ -554,8 +579,20 @@ export async function presetStatus(id: string): Promise<PresetStatus> {
   return readPresetStatus(await quick(await installFor(f), ["presets", "status", f.config, "--output", "json"]));
 }
 
+let presetChanging = false; // Autotune and Re-check refuse to start meanwhile (both write the same store)
+
 export async function changePreset(id: string, action: "off" | "undo" | "apply" | "delete", preset?: string): Promise<PresetStatus> {
   if (run && (run.job.kind === "tune" || run.job.kind === "recheck")) throw new Error(`${busyName[run.job.kind]} is running; wait for it to finish`);
+  if (presetChanging) throw new Error("Saved tuning is being changed; try again in a moment");
+  presetChanging = true;
+  try {
+    return await changeNow(id, action, preset);
+  } finally {
+    presetChanging = false;
+  }
+}
+
+async function changeNow(id: string, action: "off" | "undo" | "apply" | "delete", preset?: string): Promise<PresetStatus> {
   const f = await findModel(id);
   const install = await installFor(f);
   const known = (await presetStatus(id)).presets;
@@ -589,7 +626,8 @@ export async function startRecheck(id: string, preset: string) {
     });
     const x = await launch(install, ["presets", "recheck", preset, f.config, "--output", "json", "--status-file", status], jobCtx(r));
     const res = lastJson(x.lines);
-    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled; the preset is kept as it was" });
+    // A late cancel can come after Strata recorded the result (it writes it before answering): say so.
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled; the preset is kept, but a result may already be recorded (see Saved tuning)" });
     if (!res?.ok || typeof res.verdict !== "string") throw new Error(why(x, res));
     job.pct = 100;
     job.outcome = res.verdict === "keep" ? `"${p.name}" is still as fast: kept`

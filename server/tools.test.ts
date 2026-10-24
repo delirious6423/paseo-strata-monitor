@@ -111,7 +111,7 @@ test("jobs own their process: an update check during Autotune does not take over
   const { tmpdir } = await import("node:os");
   const { join, resolve } = await import("node:path");
   const { configure } = await import("./control.ts");
-  const { cancelJob, checkUpdate, configureTools, disposeTools, startBench, startTools, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
+  const { cancelJob, changePreset, checkUpdate, configureTools, disposeTools, startBench, startTools, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
   if (process.platform === "win32") return; // the fake CLI is a sh wrapper here; Windows runs it in the VM tests
   const home = mkdtempSync(join(tmpdir(), "strata-tools-"));
   // A Strata install whose CLI is the fake one, with one model (empty GGUF header) it can tune.
@@ -165,6 +165,12 @@ test("jobs own their process: an update check during Autotune does not take over
     await assert.rejects(checkUpdate(true));
     startTools();
     assert.equal((await checkUpdate(true)).engine.offered, "9.9.9");
+    // Saved tuning changes are one at a time, and Autotune does not start while one is being made.
+    const two = await Promise.allSettled([changePreset(id!, "off"), changePreset(id!, "off")]);
+    assert.deepEqual(two.map((t) => t.status).sort(), ["fulfilled", "rejected"]);
+    const changing = changePreset(id!, "off");
+    await assert.rejects(startTune(id!, "quick"), /Saved tuning is being changed/);
+    await changing;
     // A cancelled update says what is installed now (engine and control are not one transaction).
     await startUpdate();
     for (let i = 0; i < 100 && !/Downloading/.test((await toolsStatus()).job?.message ?? ""); i++) await new Promise((r) => setTimeout(r, 100));
@@ -183,12 +189,14 @@ test("before/after speed: mean of the repeats per kind; changes inside the runs'
     ...serial.map((v) => ({ kind: "serial", output_tok_s: v })), ...mixed.map((v) => ({ kind: "mixed", client_workers: 4, output_tok_s: v }))] });
   // Real Gyro-S numbers: two separate runs of the same settings, 3 repeats each. Neither is a change.
   assert.deepEqual(speedChange(run([74.7, 74.4, 70.1], [77.2, 77.5, 80.7]), run([70.8, 72.8, 66.4], [71.3, 70.2, 73.3])), [
-    "One request: 73.1 → 70.0 tok/s (no clear change, runs vary by ±5%)",
-    "4 at once: 78.5 → 71.6 tok/s (no clear change, runs vary by ±5%)",
+    "One request: 73.1 → 70.0 tok/s (-4.2%, no clear change: under 10%, how much runs of the same settings differed here)",
+    "4 at once: 78.5 → 71.6 tok/s (-8.8%, no clear change: under 10%, how much runs of the same settings differed here)",
   ]);
-  assert.deepEqual(speedChange(run([60], [50]), run([72], [51])), ["One request: 60.0 → 72.0 tok/s (+20.0%)", "4 at once: 50.0 → 51.0 tok/s (no clear change, runs vary by ±5%)"]);
+  assert.deepEqual(speedChange(run([60], [50]), run([72], [51])), ["One request: 60.0 → 72.0 tok/s (+20.0%)", "4 at once: 50.0 → 51.0 tok/s (+2.0%, no clear change: under 10%, how much runs of the same settings differed here)"]);
   // Repeats that scatter widely widen the band: 20% apart is not called a change.
-  assert.match(speedChange(run([50, 70], [1]), run([66, 66], [1]))[0]!, /no clear change, runs vary by ±17%/);
+  assert.match(speedChange(run([50, 70], [1]), run([66, 74], [1]))[0]!, /\+16\.7%, no clear change: these runs varied by 33%/);
+  // A different number of repeats is a different workload: not compared.
+  assert.deepEqual(speedChange(run([60, 61, 62], []), run([70], [])), []);
   // A kind missing on one side, or no numbers, is left out rather than compared wrongly.
   assert.deepEqual(speedChange(run([60], []), run([], [9])), []);
   assert.deepEqual(speedChange({}, run([1], [1])), []);

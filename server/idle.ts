@@ -1,56 +1,92 @@
-import { findModel, isBusy, listEngines, stopEngine } from "./control";
+import { findModel, isBusy, listEngines, serverUrl, stopEngine } from "./control";
 import { getSnapshot } from "./strata";
 import { recordIdleStop } from "./tools";
 
 // Idle stop: a model that is ready and has had no requests for the set minutes is stopped, to free the GPU.
 // "No requests" is read from the running server's own counters (Strata's /metrics, as the screen shows it):
 // its request total did not change, nothing is queued and its state is "idle". When the server cannot be read,
-// or is not the one on the model's port, the model counts as busy: an unknown is never a reason to stop.
+// a counter is missing, or the snapshot is of another server (even one on the same port elsewhere), the model
+// counts as busy: an unknown is never a reason to stop.
 
 const TICK_MS = 30_000;
 
 let minutes = 0;
 export const configureIdle = (m: number) => void (minutes = m);
 
-type Seen = { lastActiveMs: number; requests: number | null };
+type Seen = { lastActiveMs: number; requests: number };
 const seen = new Map<string, Seen>();
 
 const real = {
   engines: async () => (await listEngines()).engines,
+  /** The model's own server root: the snapshot must be of exactly this server (not another one on its port). */
+  url: async (id: string) => serverUrl(await findModel(id)),
   snapshot: () => getSnapshot(),
-  stop: async (id: string) => {
+  /** Stop, wait until it is really stopped, then record it. False if it did not stop. */
+  stop: async (id: string, limit: number) => {
     const f = await findModel(id);
     await stopEngine(id);
-    await recordIdleStop(f, minutes);
+    for (let i = 0; i < 50; i++) {
+      await new Promise((ok) => setTimeout(ok, 2000));
+      const e = (await listEngines(true)).engines.find((x) => x.id === id);
+      if (e?.state === "stopped" || e?.state === "failed") {
+        await recordIdleStop(f, limit);
+        return true;
+      }
+    }
+    return false;
   },
   busy: isBusy,
 };
 export type IdleDeps = typeof real;
 
-/** One look; exported for the tests (`now` and the inputs are injectable). Returns the id it stopped, if any. */
+const origin = (u: string) => {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return null;
+  }
+};
+
+let ticking = false;
+
+/** One look; exported for the tests (`now` and the inputs are injectable). Returns the id it stopped, if any.
+ * Looks never overlap; the setting and the tools are checked again right before stopping. */
 export async function idleTick(now = Date.now(), deps: IdleDeps = real): Promise<string | null> {
-  if (minutes <= 0 || deps.busy()) {
+  if (ticking) return null;
+  ticking = true;
+  try {
+    return await look(now, deps);
+  } finally {
+    ticking = false;
+  }
+}
+
+async function look(now: number, deps: IdleDeps): Promise<string | null> {
+  const limit = minutes;
+  if (limit <= 0 || deps.busy()) {
     seen.clear(); // a tool or a change of setting starts the count again
     return null;
   }
-  const engines = await deps.engines();
-  const ready = engines.filter((e) => e.state === "ready");
+  const ready = (await deps.engines()).filter((e) => e.state === "ready");
   for (const id of [...seen.keys()]) if (!ready.some((e) => e.id === id)) seen.delete(id);
   if (!ready.length) return null;
   const snap = await deps.snapshot().catch(() => null);
   for (const e of ready) {
     const s = seen.get(e.id);
-    const mine = !!snap?.online && !!snap.url && new URL(snap.url).port === String(e.port);
+    const own = await deps.url(e.id).catch(() => null);
+    const mine = !!snap?.online && !!snap.url && !!own && origin(snap.url) === origin(own);
+    // Each sign of idleness must be read, not assumed: a missing counter or queue counts as activity.
     const requests = mine ? snap!.totals.requests : null;
-    const active = !mine || snap!.state !== "idle" || (snap!.queued ?? 0) > 0 || !s || requests !== s.requests;
-    if (active || !s) {
-      seen.set(e.id, { lastActiveMs: active ? now : (s?.lastActiveMs ?? now), requests });
+    const quiet = mine && snap!.state === "idle" && snap!.queued === 0 && requests !== null;
+    if (!quiet || !s || requests !== s.requests) {
+      if (quiet) seen.set(e.id, { lastActiveMs: now, requests: requests! });
+      else seen.delete(e.id);
       continue;
     }
-    if (now - s.lastActiveMs < minutes * 60_000) continue;
+    if (now - s.lastActiveMs < limit * 60_000) continue;
     seen.delete(e.id);
-    await deps.stop(e.id);
-    return e.id;
+    if (minutes !== limit || deps.busy()) return null; // the setting changed, or a tool started, during this look
+    return (await deps.stop(e.id, limit)) ? e.id : null;
   }
   return null;
 }
