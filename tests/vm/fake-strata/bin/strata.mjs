@@ -10,7 +10,9 @@ const here = dirname(dirname(fileURLToPath(import.meta.url)));
 const win = process.platform === "win32";
 const roaming = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
 const PROFILES = process.env.STRATA_PROFILE_DIR || (win ? join(roaming, "Strata", "profiles") : join(homedir(), ".config/strata/profiles"));
-const STATE = process.env.STRATA_RUNTIME_DIR || join(homedir(), ".fake-strata-runtime");
+// Where Strata's runtime keeps its state and each profile's server log (strata_control/runtime.py).
+const STATE = process.env.STRATA_RUNTIME_DIR || (win ? join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "Strata", "runtime")
+  : join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "strata", "runtime"));
 const a = process.argv.slice(2);
 const arg = (n) => (a.includes(n) ? a[a.indexOf(n) + 1] : null);
 const out = (o, code = 0) => {
@@ -40,7 +42,8 @@ if (a[0] === "runtime") {
     const cfg = JSON.parse(readFileSync(join(PROFILES, `${name}.json`), "utf8")).source_config;
     const p = JSON.parse(readFileSync(cfg, "utf8")).port ?? 8095;
     mkdirSync(STATE, { recursive: true });
-    const log = openSync(join(STATE, `${name}.log`), "a");
+    const log = openSync(join(STATE, `${name}.server.log`), "a");
+    writeFileSync(join(STATE, `${name}.server.log`), `[strata] starting ${name} on port ${p}\n`, { flag: "a" });
     const child = spawn(process.execPath, [join(here, "serve", "server.py"), "--engine", "strata", "--config", cfg, "--port", String(p)],
       { detached: true, stdio: ["ignore", log, log], windowsHide: true });
     child.unref();
@@ -67,7 +70,39 @@ let interrupted = false;
 process.on("SIGINT", () => (interrupted = true));
 const PRESETS = join(homedir(), ".fake-strata-presets.json");
 const presets = () => (existsSync(PRESETS) ? JSON.parse(readFileSync(PRESETS, "utf8")) : []);
+const UNDO = join(homedir(), ".fake-strata-presets-undo.json");
+const savePresets = (list) => {
+  writeFileSync(UNDO, JSON.stringify(presets())); // one step of undo, like Strata's per-slot history
+  writeFileSync(PRESETS, JSON.stringify(list));
+};
 if (a[0] === "presets" && a[1] === "list") out({ ok: true, presets: presets() });
+// One slot for every config here (Strata keys slots by model and settings; the tests use one model).
+if (a[0] === "presets" && a[1] === "status") {
+  const list = presets();
+  out({ ok: true, slot: "s1", state: list.some((p) => p.active) ? "fresh" : null, reasons: [],
+    presets: list.map((p) => ({ ...p, gain_pct: 8, decode_tok_s: 45.9, notice: "Answers are identical to the standard setup.", created: "2026-10-25T00:00:00+0000" })),
+    can_undo: existsSync(UNDO), switched_off: list.length > 0 && !list.some((p) => p.active) });
+}
+if (a[0] === "presets" && ["off", "apply", "delete"].includes(a[1])) {
+  const list = presets();
+  if (a[1] !== "off" && !list.some((p) => p.id === a[2])) out({ ok: false, error: { code: 5, message: `no preset ${a[2]}` } }, 5);
+  savePresets(a[1] === "off" ? list.map((p) => ({ ...p, active: false }))
+    : a[1] === "apply" ? list.map((p) => ({ ...p, active: p.id === a[2] }))
+    : list.filter((p) => p.id !== a[2]));
+  out({ ok: true });
+}
+if (a[0] === "presets" && a[1] === "undo") {
+  if (!existsSync(UNDO)) out({ ok: false, error: { code: 5, message: "nothing to undo" } }, 5);
+  writeFileSync(PRESETS, readFileSync(UNDO));
+  rmSync(UNDO);
+  out({ ok: true, active: presets().find((p) => p.active) ?? null });
+}
+const UPDATED = join(homedir(), ".fake-strata-updated");
+if (a[0] === "components" && a[1] === "rollback") {
+  if (!existsSync(UPDATED)) out({ ok: false, error: { code: 2, message: "there is no previous engine to return to" } }, 2);
+  rmSync(UPDATED);
+  out({ ok: true, component: "engine", status: "rolled-back", from: "9.9.9", to: "1.0", presets_marked: true });
+}
 if (a[0] === "bench" && a[1] === "run") {
   const dir = arg("--out");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -106,8 +141,18 @@ if (a[0] === "tune" && a[1] === "auto") {
   writeFileSync(status, JSON.stringify({ state: "done", result }));
   out({ ok: true, result });
 }
+if (a[0] === "presets" && a[1] === "recheck") {
+  const status = arg("--status-file");
+  for (let i = 0; i <= 4; i++) {
+    writeFileSync(status, JSON.stringify({ state: "running", message: `Re-check ${i} of 4`, runs_done: i, runs_planned: 4 }));
+    await sleep(500);
+    if (interrupted) out({ ok: false, error: { code: 130, message: "cancelled" } }, 130);
+  }
+  out({ ok: true, verdict: "keep", reason: null, preset: { id: a[2] } });
+}
 if (a[0] === "update" && a.includes("--check")) {
-  out({ ok: true, engine: { installed: null, offered: { version: "9.9.9" }, status: "install", download_bytes: 5_000_000 },
+  out({ ok: true, engine: { installed: existsSync(UPDATED) ? "9.9.9" : null, offered: { version: "9.9.9" }, status: "install", download_bytes: 5_000_000,
+    previous: existsSync(UPDATED) ? "1.0" : null },
     control: { installed: "1.0", offered: "1.1", status: "available", download_bytes: 1_000_000 } });
 }
 if (a[0] === "update") {
@@ -118,6 +163,7 @@ if (a[0] === "update") {
   }
   process.stdout.write(JSON.stringify({ schema_version: 1, event: "phase", phase: "test", message: "Test start of the new engine" }) + "\n");
   await sleep(400);
+  writeFileSync(UPDATED, "");
   out({ ok: true, exit_code: 0, results: [{ component: "engine", status: "updated", version: "9.9.9" }, { component: "control", status: "updated", version: "1.1" }] });
 }
 out({ ok: false, error: { code: 2, message: `unsupported: ${a.join(" ")}` } }, 2);

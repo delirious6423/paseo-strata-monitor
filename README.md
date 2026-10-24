@@ -8,9 +8,18 @@ the Strata models on your machine, load or stop one with a click, and watch the 
   with several Paseo clients, and a Strata server the plugin did not start blocks Load until you stop it.
 - **Tools** for the selected model, through Strata's own command-line tool: **Benchmark** (Strata's quick
   serving check of the running model: tok/s, time to first token, alone and 4 at once), **Autotune** (finds the
-  fastest settings for this PC, about 20 minutes, and saves them as a preset the server uses at every start; it
-  stops the running model first; after Cancel it shows whether a preset was saved) and **Check for updates / Install
-  update** (engine and control from Strata's signed feed). One tool at a time; Load waits until it ends.
+  fastest settings for this PC, about 20 minutes, and saves them as a preset the server uses at every start; a
+  running model is measured before, started again and measured after, so you see what changed; after Cancel it
+  shows whether a preset was saved) and **Check for updates / Install update / Undo update** (engine and control
+  from Strata's signed feed, and back to the engine version the last update kept). One tool at a time; Load
+  waits until it ends.
+- **Saved tuning** for the selected model: which preset it starts with and whether it is still valid for this PC
+  and engine; use another, switch off, undo, delete, or **Re-check** (Strata's 2-minute check that a preset is
+  still as fast). A warning replaces it for a model whose server does not apply presets.
+- **Server log**: the last lines of the selected model's journal or Strata runtime log; opens by itself when a
+  load fails.
+- **Idle stop** (Settings, off by default): stop a model after 15, 30, 60 or 120 minutes without requests, to
+  free the GPU.
 - **Live status**: an always-visible sidebar row with prefill and decode tok/s, and a screen with a speed graph,
   queue, GPU/RAM use and recent requests.
 
@@ -60,6 +69,20 @@ All three use the Strata command-line tool of the first Strata install that has 
   `strata presets undo` or `strata presets off`. The result is remembered: Strata's server applies the saved preset
   at every start (its log says `saved tuning '…' applied`), so autotune once per model, and again after a new
   engine, driver or GPU. Only a server with Strata's preset support applies them (`apply_saved_tuning` in its `serve/server.py`); for a model whose server lacks it, the screen warns that a result would not be used.
+- Before/after (autotune of a running model): one throwaway `bench run` (the first requests after a start are
+  slow: 41.6 against 66-73 tok/s steady on Gyro-S), then `--repeat 3`, before the tune and after the restart. The
+  plugin compares the mean tok/s per phase itself (`strata bench compare` refuses runs whose server settings
+  differ, which a tune may cause) and calls a change under 10%, or under the repeats' own spread, "no clear
+  change": separate runs of the same settings differed by up to 9% here.
+- Saved tuning: `strata presets status <run config>`, `presets apply|delete <id>`, `presets off <run config>`,
+  `presets undo <run config> --config <run config>`, `presets recheck <id> <run config> --status-file …`.
+- Server log: `journalctl --user -u <unit>` for a systemd model, else the tail of Strata's
+  `<state>/strata/runtime/paseo-<model>.server.log` (`STRATA_RUNTIME_DIR` if set).
+- Idle stop: every 30 s the plugin reads the running server's `/metrics` (as the screen does); a model whose
+  request total has not moved, with nothing queued and state `idle`, for the set minutes is stopped. A server it
+  cannot read counts as busy. A running tool resets the count.
+- Undo update: `strata components rollback --output json --wait 0`, offered when `update --check` names a
+  previous engine.
 - Update: `strata update --check`, then `strata update --output jsonl --wait 0`. Strata switches to a new engine
   only after a test start and keeps the previous one (`strata components rollback`). An update installs into
   Strata's component folder; a run config that starts its own engine file is not changed, and the screen says so.

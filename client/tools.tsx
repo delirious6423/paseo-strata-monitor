@@ -4,10 +4,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { Engine } from "../shared/control";
-import { type Job, strataBench, strataCancel, strataTools, strataTune, strataUpdate, strataUpdateCheck } from "../shared/tools";
+import { type Job, strataBench, strataCancel, strataRollback, strataTools, strataTune, strataUpdate, strataUpdateCheck } from "../shared/tools";
+import { Presets } from "./extras";
 import type { Styles } from "./monitor";
 
-const KIND = { bench: "Benchmark", tune: "Autotune", update: "Update" } as const;
+const KIND = { bench: "Benchmark", tune: "Autotune", update: "Update", recheck: "Re-check", rollback: "Undo update", idle: "Idle stop" } as const;
 const ago = (ms: number) => {
   const m = Math.round((Date.now() - ms) / 60_000);
   return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
@@ -29,6 +30,7 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
   const tune = useRpc(strataTune);
   const check = useRpc(strataUpdateCheck);
   const update = useRpc(strataUpdate);
+  const rollback = useRpc(strataRollback);
   const cancel = useRpc(strataCancel);
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["strata-tools"] });
@@ -40,9 +42,9 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
   // A second press confirms the long or disruptive actions; the question goes away after 6 s, or when another
   // model is selected (a confirmed Autotune must be for the model it was asked about).
   const [asked, setConfirm] = useState<string | null>(null);
-  const confirm = asked === `tune:${sel.id}` ? "tune" : asked === "update" ? "update" : null;
+  const confirm = asked === `tune:${sel.id}` ? "tune" : asked === "update" || asked === "rollback" ? asked : null;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ask = (kind: "tune" | "update", run: () => void) => {
+  const ask = (kind: "tune" | "update" | "rollback", run: () => void) => {
     const what = kind === "tune" ? `tune:${sel.id}` : kind;
     if (asked === what) {
       setConfirm(null);
@@ -85,7 +87,9 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       <Text style={[styles.label, { fontSize: 12 }]}>Tools · {sel.provider} {sel.quant}</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {button("Benchmark", () => act.mutate(() => bench({ id: sel.id })), { disabled: busy || sel.state !== "ready" })}
-        {button(confirm === "tune" ? `Press again: stops the model, ~20 min${sel.keepsTuning === false ? ", result not kept" : ""}` : "Autotune",
+        {button(confirm === "tune"
+          ? `Press again: ~20 min${sel.state === "ready" ? ", restarts the model, speed before/after" : ", stops the running model"}${sel.keepsTuning === false ? ", result not kept" : ""}`
+          : "Autotune",
           () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: "quick" }))), { disabled: busy, warn: confirm === "tune" })}
         {button(checking.isPending ? "Checking…" : "Check for updates", () => checking.mutate(), { disabled: busy || checking.isPending })}
       </View>
@@ -101,6 +105,8 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       {act.error || checking.error ? (
         <Text style={{ color: c.statusDanger, fontSize: 12 }}>{(act.error ?? checking.error)?.message}</Text>
       ) : null}
+
+      <Presets theme={theme} styles={styles} sel={sel} busy={!!running} />
 
       {running ? <Running job={running} theme={theme} styles={styles} onCancel={() => act.mutate(() => cancel({}))} /> : null}
 
@@ -121,6 +127,10 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
               files), so an update would not change them.
             </Text>
           ) : null}
+          {u.previous
+            ? button(confirm === "rollback" ? `Press again: stops the model, back to ${u.previous}` : `Undo update (back to ${u.previous})`,
+                () => ask("rollback", () => act.mutate(() => rollback({}))), { disabled: busy, warn: confirm === "rollback" })
+            : null}
           {u.available
             ? button(confirm === "update" ? `Press again: stops the model, downloads ${mb(u.downloadBytes)}` : "Install update",
                 () => ask("update", () => act.mutate(() => update({}))), { disabled: busy, warn: confirm === "update" })

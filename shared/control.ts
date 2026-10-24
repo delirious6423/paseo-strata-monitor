@@ -12,6 +12,8 @@ export const discoverySettings = defineSettings({
     extraUrls: z.array(z.string()).default([]),
     // Linux: start/stop models through the user systemd units that already run them.
     useSystemd: z.boolean().default(true),
+    // Stop a model the plugin can stop after this many minutes without requests (0: never). Frees the GPU.
+    idleStopMinutes: z.number().int().min(0).max(1440).default(0),
   }),
 });
 

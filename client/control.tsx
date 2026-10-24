@@ -6,6 +6,7 @@ import { Pressable, Text, View } from "react-native";
 import { type Engine, strataEngines, strataLoad, strataStop } from "../shared/control";
 import { gb, groupEngines } from "../shared/group";
 import type { Styles } from "./monitor";
+import { ServerLog } from "./extras";
 import { Tools } from "./tools";
 
 const BUSY_MS = 1000;
@@ -170,6 +171,7 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
       {sel.error || action.error ? (
         <Text style={{ color: c.statusDanger, fontSize: 12 }}>{action.error?.message ?? sel.error}</Text>
       ) : null}
+      <ServerLog theme={theme} styles={styles} sel={sel} />
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${label} ${sel.provider} ${sel.quant}`}

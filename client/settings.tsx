@@ -2,7 +2,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useSettings } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
-import { Text, TextInput } from "react-native";
+import { Pressable, Text, TextInput, View } from "react-native";
 import { discoverySettings } from "../shared/control";
 import { useEngines } from "./control";
 
@@ -63,6 +63,34 @@ export function DiscoverySettings({ theme }: PluginSurfaceProps) {
             value={settings.values.useSystemd}
             onValueChange={(useSystemd) => void settings.save({ ...settings.values, useSystemd }, settings.revision)}
           />
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection title="Free the GPU">
+        <SettingsCard>
+          <SettingsRow
+            label="Stop a model after no requests for"
+            hint="Checked every 30 s from the server's own request counters. Off by default; a running tool (Autotune, Benchmark) is never interrupted."
+          >
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {[0, 15, 30, 60, 120].map((m) => {
+                const on = settings.values.idleStopMinutes === m;
+                return (
+                  <Pressable
+                    key={m}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: on }}
+                    accessibilityLabel={m ? `Stop after ${m} minutes idle` : "Never stop when idle"}
+                    disabled={settings.saving}
+                    onPress={() => void settings.save({ ...settings.values, idleStopMinutes: m }, settings.revision)}
+                    style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1,
+                      borderColor: on ? c.accent : c.border, backgroundColor: on ? c.surface2 : "transparent" }}
+                  >
+                    <Text style={{ color: c.foreground, fontSize: 13 }}>{m ? `${m} min` : "Off"}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </SettingsRow>
         </SettingsCard>
       </SettingsSection>
       <SettingsSection title="Searched">

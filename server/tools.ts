@@ -2,8 +2,8 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { type Job, type UpdateCheck, jobSchema } from "../shared/tools";
-import { cmdExeLine, discovery, findModel, freeGpu, readyModel, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
+import { type Job, type PresetStatus, type UpdateCheck, jobSchema } from "../shared/tools";
+import { cmdExeLine, discovery, findModel, freeGpu, listEngines, loadForTool, readyModel, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
 import type { Found } from "./discover";
 import { installPlaces } from "./discover";
 import { type Os, cliIn, componentsDir, here, pluginStateDir } from "./places";
@@ -159,13 +159,13 @@ export function disposeTools() {
   for (const p of checks) interrupt(p, () => {});
 }
 
-const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update" } as const;
+const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update", recheck: "A preset re-check", rollback: "An engine rollback", idle: "An idle stop" } as const;
 
 /** Claim the one tool slot at once (before anything is awaited, so two presses cannot both get it), run
  * `prepare` (its error goes back to the press, nothing is recorded), then `body` in the background. The slot
  * and the Load block are released only by the run that holds them. */
 async function startJob(kind: Job["kind"], modelId: string | null, prepare: () => Promise<Found | null>,
-    body: (r: Run, f: Found | null, poll: (fn: () => Promise<void>) => void) => Promise<void>) {
+    body: (r: Run, f: Found | null, poll: Poll) => Promise<void>) {
   if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
   const job: Job = {
     id: Date.now().toString(36), kind, modelId, model: null, // the model from the press: Stop finds it while preparing
@@ -188,8 +188,12 @@ async function startJob(kind: Job["kind"], modelId: string | null, prepare: () =
     throw e;
   }
   Object.assign(job, { modelId: f?.id ?? null, model: f ? `${f.provider} ${f.quant}` : null });
-  let timer: NodeJS.Timeout | null = null;
-  const poll = (fn: () => Promise<void>) => void (timer = setInterval(() => void fn().catch(() => {}), 1000));
+  const timers = new Set<NodeJS.Timeout>();
+  const poll = (fn: () => Promise<void>) => {
+    const t = setInterval(() => void fn().catch(() => {}), 1000);
+    timers.add(t);
+    return () => void (clearInterval(t), timers.delete(t));
+  };
   void (async () => {
     try {
       await body(r, f, poll);
@@ -197,7 +201,7 @@ async function startJob(kind: Job["kind"], modelId: string | null, prepare: () =
       job.state = "failed";
       job.error = String((e as Error).message ?? e).slice(0, 300);
     } finally {
-      if (timer) clearInterval(timer);
+      for (const t of timers) clearInterval(t);
       if (job.state === "running") job.state = "done";
       job.endedMs = Date.now();
       job.minutesLeft = null;
@@ -208,10 +212,13 @@ async function startJob(kind: Job["kind"], modelId: string | null, prepare: () =
   })();
 }
 
-/** The job's own CLI: Cancel interrupts it; once it ended, Cancel has nothing left to stop. */
-const jobCtx = (r: Run): Ctx => ({ stop: () => r.cancel, started: (p) => r.procs.add(p), done: (p) => {
+type Poll = (fn: () => Promise<void>) => () => void;
+
+/** The job's own CLI: Cancel interrupts it. `last`: once this one ended the work is over and Cancel has nothing
+ * left to stop (a job of several steps, like autotune with its before/after measurement, passes false). */
+const jobCtx = (r: Run, last = true): Ctx => ({ stop: () => r.cancel, started: (p) => r.procs.add(p), done: (p) => {
   r.procs.delete(p);
-  r.exited = true;
+  if (last) r.exited = true;
 } });
 /** A short read-only helper for the job (runs also after a cancel, to find out what changed), time-limited. */
 const helperCtx = (r: Run): Ctx => ({ stop: () => disposed, started: (p) => r.procs.add(p), done: (p) => r.procs.delete(p), timeoutMs: 60_000 });
@@ -240,32 +247,76 @@ setBeforeStop(async (id) => {
   if (run === r) throw new Error("The benchmark of this model is still stopping; try again in a moment");
 });
 
+type BenchRun = { summary: Record<string, any>; ok: boolean; path: string | null };
+
+/** One serving-smoke run against the model's server; null when cancelled. `label` prefixes the progress. */
+async function runBench(r: Run, f: Found, install: string, poll: Poll, label: string, last: boolean, repeat = 1): Promise<BenchRun | null> {
+  const job = r.job;
+  const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
+  await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
+  job.message = `${label}Warming up`;
+  const stop = poll(async () => {
+    const p = JSON.parse(await readFile(join(out, "progress.json"), "utf8"));
+    const planned = Array.isArray(p.planned_phases) ? p.planned_phases.length : 0;
+    if (planned && !label) job.pct = Math.round((100 * (p.completed_phases ?? 0)) / planned);
+    if (p.current_phase && !r.cancel) job.message = `${label}Measuring: ${p.current_phase}`;
+  });
+  const x = await launch(install, ["bench", "run", "--url", serverUrl(f), "--suite", "serving-smoke",
+    "--condition", "paseo", "--repeat", String(repeat), "--out", out, "--output", "json"], jobCtx(r, last));
+  stop();
+  const res = lastJson(x.lines);
+  if (r.cancel) return null;
+  if (!res?.summary) throw new Error(why(x, res));
+  return { summary: res.summary, ok: !!res.ok, path: typeof res.path === "string" ? res.path : null };
+}
+
+/** Before -> after per kind of phase (one request, several at once): the mean output tok/s of each run's
+ * repeats. A change inside the spread the repeats themselves show, and at least 10% (separate runs of one
+ * model with the same settings differed by up to 9% here), is reported as no clear change. Strata's own `bench compare` refuses runs whose server
+ * settings differ, which is exactly what a tune may change, so this is plain arithmetic. */
+export function speedChange(before: Record<string, any>, after: Record<string, any>): string[] {
+  const byKind = (x: Record<string, any>) => {
+    const m = new Map<string, { vals: number[]; workers: unknown }>();
+    for (const p of Array.isArray(x?.phases) ? x.phases : []) {
+      if (!p || p.kind === "warmup" || typeof p.output_tok_s !== "number" || p.output_tok_s <= 0) continue;
+      const e = m.get(p.kind) ?? { vals: [] as number[], workers: p.client_workers as unknown };
+      e.vals.push(p.output_tok_s);
+      m.set(p.kind, e);
+    }
+    return m;
+  };
+  const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
+  const spread = (v: number[]) => (v.length > 1 ? (100 * (Math.max(...v) - Math.min(...v))) / mean(v) : 0);
+  const a = byKind(after);
+  return [...byKind(before)].flatMap(([kind, b]) => {
+    const now = a.get(kind);
+    if (!now) return [];
+    const old = mean(b.vals), cur = mean(now.vals);
+    const pct = 100 * (cur / old - 1);
+    const noise = Math.max(10, spread(b.vals), spread(now.vals));
+    const name = kind === "serial" ? "One request" : kind === "mixed" ? `${b.workers ?? "Several"} at once` : kind;
+    const verdict = Math.abs(pct) < noise ? `no clear change, runs vary by ±${(noise / 2).toFixed(0)}%` : `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+    return [`${name}: ${n(old)} → ${n(cur)} tok/s (${verdict})`];
+  });
+}
+
+/** A measurement the before/after comparison can trust: one throwaway run first (the first requests after a
+ * start are slow: 41.6 against 66-73 tok/s steady here), then 3 repeats. */
+async function measure(r: Run, f: Found, install: string, poll: Poll, label: string): Promise<BenchRun | null> {
+  if (!(await runBench(r, f, install, poll, `${label}warming up · `, false))) return null;
+  return runBench(r, f, install, poll, label, false, 3);
+}
+
 export async function startBench(id: string) {
   await startJob("bench", id, () => readyModel(id), async (r, model, poll) => {
     const job = r.job;
     const f = model!;
-    const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
-    await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
-    job.message = "Warming up";
-    poll(async () => {
-      const p = JSON.parse(await readFile(join(out, "progress.json"), "utf8"));
-      const planned = Array.isArray(p.planned_phases) ? p.planned_phases.length : 0;
-      if (planned) job.pct = Math.round((100 * (p.completed_phases ?? 0)) / planned);
-      if (p.current_phase && !r.cancel) job.message = `Measuring: ${p.current_phase}`;
-    });
-    const x = await launch(await installFor(f), ["bench", "run", "--url", serverUrl(f), "--suite", "serving-smoke",
-      "--condition", "paseo", "--out", out, "--output", "json"], jobCtx(r));
-    const res = lastJson(x.lines);
-    if (r.cancel) {
-      job.state = "cancelled";
-      job.outcome = "Cancelled";
-      return;
-    }
-    if (!res?.summary) throw new Error(why(x, res));
+    const b = await runBench(r, f, await installFor(f), poll, "", true);
+    if (!b) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled" });
     job.pct = 100;
-    job.details = benchLines(res.summary);
-    job.outcome = res.ok ? "Finished" : "Finished with failed requests";
-    if (typeof res.path === "string") job.details.push(`Report: ${res.path}`);
+    job.details = benchLines(b.summary);
+    job.outcome = b.ok ? "Finished" : "Finished with failed requests";
+    if (b.path) job.details.push(`Report: ${b.path}`);
   });
 }
 
@@ -312,27 +363,54 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
     const install = await installFor(f);
     await mkdir(state(), { recursive: true, mode: 0o700 });
     await rm(status, { force: true });
-    const before = await presetNames(install, r);
-    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
+    // A model that is running is measured before, and started and measured again after: the screen then shows
+    // what the tune changed. One that was not running is left stopped.
+    const wasReady = (await listEngines(true)).engines.find((e) => e.id === id)?.state === "ready";
+    let before: BenchRun | null = null;
+    if (wasReady) {
+      before = await measure(r, f, install, poll, "Speed before: ").catch((e) => {
+        job.details.push(`Speed before: not measured (${String(e.message ?? e).slice(0, 120)})`);
+        return null;
+      });
+    }
+    const presetsBefore = await presetNames(install, r);
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything was saved" });
     job.message = "Stopping the running model";
     await freeGpu(() => r.cancel);
     job.message = "Measuring your current settings";
-    poll(async () => {
+    const stopPoll = poll(async () => {
       const st = JSON.parse(await readFile(status, "utf8"));
       if (st.runs_planned) job.pct = Math.min(99, Math.round((100 * (st.runs_done ?? 0)) / st.runs_planned));
       if (typeof st.message === "string" && !r.cancel) job.message = st.message;
       job.minutesLeft = typeof st.minutes_left === "number" ? st.minutes_left : null;
     });
-    const x = await launch(install, ["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], jobCtx(r));
+    const x = await launch(install, ["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], jobCtx(r, false));
+    stopPoll();
+    const cancelled = r.cancel; // a Cancel from here on only skips the "after" measurement
     job.message = "Checking what was saved";
-    const after = await presetNames(install, r);
+    job.minutesLeft = null;
+    const presetsAfter = await presetNames(install, r);
     const result = lastJson(x.lines)?.result ?? null;
     // Strata names the preset it saved; when its output is missing (cancelled late), compare the lists.
     const named = typeof result?.preset?.name === "string" ? [result.preset.name] : null;
-    const saved = named ?? (before && after ? [...after].filter(([k]) => !before.has(k)).map(([, v]) => v) : null);
-    const rep = tuneReport(result, x.code, r.cancel, saved);
-    Object.assign(job, rep, { pct: rep.state === "done" ? 100 : job.pct });
+    const saved = named ?? (presetsBefore && presetsAfter ? [...presetsAfter].filter(([k]) => !presetsBefore.has(k)).map(([, v]) => v) : null);
+    const rep = tuneReport(result, x.code, cancelled, saved);
+    const measured = job.details;
+    Object.assign(job, rep, { details: [...rep.details, ...measured], pct: rep.state === "done" ? 99 : job.pct });
     if (rep.state === "failed" && !rep.error) job.error = why(x, lastJson(x.lines));
+    if (!wasReady) return void (rep.state === "done" && job.details.push("Load the model and press Benchmark to measure it with the new settings"));
+    if (cancelled || r.cancel) return void job.details.push("The model was stopped for autotune; press Load to start it again");
+    // Put the model back the way it was, now with the saved tuning, and measure again.
+    job.message = "Starting the model again";
+    try {
+      await loadForTool(id, () => r.cancel);
+      const after = before && rep.state === "done" ? await measure(r, f, install, poll, "Speed after: ") : null;
+      if (before && after) job.details.push(...speedChange(before.summary, after.summary).map((l) => `Speed: ${l}`));
+      else if (rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
+    } catch (e) {
+      job.details.push(`Not started again: ${String((e as Error).message ?? e).slice(0, 150)}`);
+    }
+    if (rep.state === "done") job.pct = 100;
   });
 }
 
@@ -353,6 +431,7 @@ export function readCheck(report: Record<string, any>, engines: string[], compon
     checkedMs: Date.now(), engine, control,
     downloadBytes: bytes.reduce((a, b) => a + (typeof b === "number" ? b : 0), 0) || null,
     reachesModels: engines.some((e) => resolve(e).startsWith(root)),
+    previous: typeof report.engine?.previous === "string" ? report.engine.previous : null,
     available: [engine.status, control.status].some((s) => s === "install" || s === "update" || s === "available"),
   };
 }
@@ -417,4 +496,118 @@ export async function startUpdate() {
     if (res!.ok) job.outcome = "Updated";
     else Object.assign(job, { state: "failed", error: "Some parts did not update; see below (each part is kept or replaced on its own)" });
   });
+}
+
+// ------------------------------------------------------------------------------------------- rollback
+
+/** `strata components rollback`: back to the engine version the last update kept (stops whatever runs first). */
+export async function startRollback() {
+  await startJob("rollback", null, async () => null, async (r) => {
+    const job = r.job;
+    const install = await installFor();
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
+    job.message = "Stopping the running model";
+    await freeGpu(() => r.cancel);
+    job.message = "Switching back to the previous engine";
+    const x = await launch(install, ["components", "rollback", "--output", "json", "--wait", "0"], jobCtx(r));
+    const res = lastJson(x.lines);
+    lastCheck = null;
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled; check the installed version with Check for updates" });
+    if (!res?.ok) throw new Error(why(x, res));
+    job.pct = 100;
+    job.outcome = `Engine back to ${res.to ?? "the previous version"}${res.from ? ` (from ${res.from})` : ""}`;
+    if (res.presets_marked) job.details.push("Saved presets are marked for a short re-check");
+  });
+}
+
+// ------------------------------------------------------------------------------------------- presets
+
+const asText = (v: unknown) => (typeof v === "string" ? v : null);
+const asNum = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/** `strata presets status <run config> --output json` -> what the screen shows. */
+export function readPresetStatus(res: Record<string, any>): PresetStatus {
+  const list = Array.isArray(res.presets) ? res.presets : [];
+  return {
+    state: asText(res.state),
+    reasons: Array.isArray(res.reasons) ? res.reasons.map(String).slice(0, 10) : [],
+    presets: list.flatMap((p: any) => (typeof p?.id !== "string" ? [] : [{
+      id: p.id, name: String(p.name ?? p.id), active: p.active === true, created: asText(p.created),
+      gainPct: asNum(p.gain_pct), decodeTokS: asNum(p.decode_tok_s), notice: asText(p.notice),
+      lastRecheck: asText(p.recheck?.last_ok) ?? asText(p.recheck?.last_result),
+    }])),
+    switchedOff: res.switched_off === true,
+    canUndo: res.can_undo === true,
+  };
+}
+
+/** A short, read-only or bookkeeping CLI call outside any job (the presets store has its own lock). */
+async function quick(install: string, args: string[]): Promise<Record<string, any>> {
+  const x = await launch(install, args, { stop: () => disposed, started: (p) => checks.add(p), done: (p) => checks.delete(p), timeoutMs: 60_000 });
+  const res = lastJson(x.lines);
+  if (!res?.ok) throw new Error(why(x, res));
+  return res;
+}
+
+export async function presetStatus(id: string): Promise<PresetStatus> {
+  const f = await findModel(id);
+  return readPresetStatus(await quick(await installFor(f), ["presets", "status", f.config, "--output", "json"]));
+}
+
+export async function changePreset(id: string, action: "off" | "undo" | "apply" | "delete", preset?: string): Promise<PresetStatus> {
+  if (run && (run.job.kind === "tune" || run.job.kind === "recheck")) throw new Error(`${busyName[run.job.kind]} is running; wait for it to finish`);
+  const f = await findModel(id);
+  const install = await installFor(f);
+  const known = (await presetStatus(id)).presets;
+  if ((action === "apply" || action === "delete") && !known.some((p) => p.id === preset)) throw new Error("That preset is not one of this model's");
+  const args = action === "off" ? ["presets", "off", f.config]
+    : action === "undo" ? ["presets", "undo", f.config, "--config", f.config]
+    : ["presets", action, preset!];
+  await quick(install, [...args, "--output", "json"]);
+  return presetStatus(id);
+}
+
+/** Strata's short re-check that a saved preset is still as fast (needs the GPU: stops whatever runs first). */
+export async function startRecheck(id: string, preset: string) {
+  const status = join(state(), "recheck-status.json");
+  await startJob("recheck", id, () => findModel(id), async (r, model, poll) => {
+    const job = r.job;
+    const f = model!;
+    const install = await installFor(f);
+    const p = (await presetStatus(id)).presets.find((x) => x.id === preset);
+    if (!p) throw new Error("That preset is not one of this model's");
+    await mkdir(state(), { recursive: true, mode: 0o700 });
+    await rm(status, { force: true });
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
+    job.message = "Stopping the running model";
+    await freeGpu(() => r.cancel);
+    job.message = `Re-checking "${p.name}"`;
+    poll(async () => {
+      const st = JSON.parse(await readFile(status, "utf8"));
+      if (st.runs_planned) job.pct = Math.min(99, Math.round((100 * (st.runs_done ?? 0)) / st.runs_planned));
+      if (typeof st.message === "string" && !r.cancel) job.message = st.message;
+    });
+    const x = await launch(install, ["presets", "recheck", preset, f.config, "--output", "json", "--status-file", status], jobCtx(r));
+    const res = lastJson(x.lines);
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled; the preset is kept as it was" });
+    if (!res?.ok || typeof res.verdict !== "string") throw new Error(why(x, res));
+    job.pct = 100;
+    job.outcome = res.verdict === "keep" ? `"${p.name}" is still as fast: kept`
+      : res.verdict === "retune" ? `"${p.name}" is not as fast as before: run Autotune again`
+      : "Could not tell (the PC was busy); kept. Try again later";
+    if (typeof res.reason === "string") job.details.push(res.reason);
+  });
+}
+
+// ------------------------------------------------------------------------------------------- idle stop
+
+/** The idle stop's record in the history (it is not a job; nothing runs). */
+export async function recordIdleStop(f: Found, minutes: number) {
+  const now = Date.now();
+  history = [{
+    id: now.toString(36), kind: "idle", modelId: f.id, model: `${f.provider} ${f.quant}`, startedMs: now, endedMs: now,
+    state: "done", pct: null, message: "", minutesLeft: null, outcome: `Stopped after ${minutes} min without requests`,
+    details: ["Frees the GPU; press Load to start it again"], error: null,
+  } satisfies Job, ...(await loadHistory())].slice(0, HISTORY);
+  await saveHistory().catch(() => {});
 }

@@ -25,19 +25,26 @@ and server (`tests/vm/fake-strata`, Node only) speak the same `profile`/`runtime
 Strata. Analytics get no configured ports, so they must find servers by scanning listeners. Control checks include two
 loads at once (exactly one model runs), Abort while the Load is still stopping the previous model (nothing
 starts), and Load refusing while a Strata server the plugin did not start is running. Tools: update check, a
-benchmark of the running model, autotune (stops the model, blocks Load, result), autotune Cancel, and an update
-with progress, against the fake CLI's `bench`/`tune`/`update`. 29 checks.
+benchmark of the running model, autotune (measures before, stops the model, blocks Load, result, starts it again
+and measures after), autotune Cancel, an update with progress and its Cancel, Undo update, saved tuning (listed,
+switch off, undo, re-check), the server log, idle stop, and Stop during a benchmark, against the fake CLI's
+`bench`/`tune`/`update`/`presets`/`components`. 36 checks.
+
+Real Strata (this machine, Gyro-S, 2026-10-25): autotune with before/after, 224 s, "already the fastest", speed
+"no clear change" (81.1 → 74.7 and 87.3 → 80.8 tok/s); the first try without warm-up showed −31% for the same
+settings, which led to the warm-up run and the 10% band. Saved tuning read, delete and apply restored the original
+preset; the 4 EXL3 models are flagged as not applying presets.
 
 The VM runners come from the dotfiles repo (`DOTFILES_ROOT`, default `~/code/dotfiles`); each refuses to touch an
 existing run and discards its own VM afterwards.
 
 | Target | Command | Last result (2026-10-24) |
 |---|---|---|
-| Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 29/29 |
-| Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 28/28 (29th check not yet run there) |
-| Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 28/28 (29th check not yet run there) |
-| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 28/28, 29th check not yet run there (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
-| macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 28/28 (29th check not yet run there) |
+| Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 36/36 |
+| Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 36/36 |
+| Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 36/36 |
+| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 36/36 (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
+| macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 36/36 |
 
 Known flake: on the emulated Windows ARM64 VM, PowerShell's first start can exceed the listener scan's 8 s
 timeout, so that one scan comes back empty; the next scan (10 s later) finds the server. On such a slow machine

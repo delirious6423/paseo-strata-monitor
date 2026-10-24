@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Job } from "../shared/tools.ts";
 import { serverUrl } from "./control.ts";
-import { benchLines, readCheck, tuneReport, updateEvent } from "./tools.ts";
+import { benchLines, readCheck, readPresetStatus, speedChange, tuneReport, updateEvent } from "./tools.ts";
 
 test("benchmark summary: one line per measured phase, warmup left out", () => {
   const lines = benchLines({ phases: [
@@ -57,8 +57,10 @@ test("update check: versions, download size, and whether the found models would 
   assert.deepEqual({ ...c, checkedMs: 0 }, {
     checkedMs: 0, engine: { installed: null, offered: "0.1.48", status: "install" },
     control: { installed: "0.1.40", offered: "0.1.49.2", status: "available" },
-    downloadBytes: 705_432_451, reachesModels: false, available: true,
+    downloadBytes: 705_432_451, reachesModels: false, available: true, previous: null,
   });
+  // After an update Strata keeps the previous engine: Undo update is offered with it.
+  assert.equal(readCheck({ ...report, engine: { ...report.engine, previous: "0.1.47" } }, [], "/c").previous, "0.1.47");
   assert.equal(readCheck(report, ["/home/u/.local/share/strata/components/engine/0.1.40/strata"], "/home/u/.local/share/strata/components").reachesModels, true);
   // A sibling folder whose name merely starts with the components path does not count.
   assert.equal(readCheck(report, ["/home/u/.local/share/strata/components-old/strata"], "/home/u/.local/share/strata/components").reachesModels, false);
@@ -174,4 +176,34 @@ test("jobs own their process: an update check during Autotune does not take over
     process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("before/after speed: mean of the repeats per kind; changes inside the runs' spread are not called a change", () => {
+  const run = (serial: number[], mixed: number[]) => ({ phases: [{ kind: "warmup", output_tok_s: 1 },
+    ...serial.map((v) => ({ kind: "serial", output_tok_s: v })), ...mixed.map((v) => ({ kind: "mixed", client_workers: 4, output_tok_s: v }))] });
+  // Real Gyro-S numbers: two separate runs of the same settings, 3 repeats each. Neither is a change.
+  assert.deepEqual(speedChange(run([74.7, 74.4, 70.1], [77.2, 77.5, 80.7]), run([70.8, 72.8, 66.4], [71.3, 70.2, 73.3])), [
+    "One request: 73.1 → 70.0 tok/s (no clear change, runs vary by ±5%)",
+    "4 at once: 78.5 → 71.6 tok/s (no clear change, runs vary by ±5%)",
+  ]);
+  assert.deepEqual(speedChange(run([60], [50]), run([72], [51])), ["One request: 60.0 → 72.0 tok/s (+20.0%)", "4 at once: 50.0 → 51.0 tok/s (no clear change, runs vary by ±5%)"]);
+  // Repeats that scatter widely widen the band: 20% apart is not called a change.
+  assert.match(speedChange(run([50, 70], [1]), run([66, 66], [1]))[0]!, /no clear change, runs vary by ±17%/);
+  // A kind missing on one side, or no numbers, is left out rather than compared wrongly.
+  assert.deepEqual(speedChange(run([60], []), run([], [9])), []);
+  assert.deepEqual(speedChange({}, run([1], [1])), []);
+});
+
+test("saved tuning status: Strata's presets status -> the screen's list", () => {
+  const st = readPresetStatus({
+    ok: true, state: "soft", reasons: ["engine changed"], switched_off: false, can_undo: true,
+    presets: [{ id: "abc", name: "Q1_0 64K – Full speed", active: true, created: "2026-10-24T22:50:52+0800", gain_pct: 0, decode_tok_s: 83.9,
+      notice: "Answers are identical to the standard setup.", recheck: { last_ok: null, last_result: null } }, { name: "no id" }],
+  });
+  assert.deepEqual(st, {
+    state: "soft", reasons: ["engine changed"], switchedOff: false, canUndo: true,
+    presets: [{ id: "abc", name: "Q1_0 64K – Full speed", active: true, created: "2026-10-24T22:50:52+0800", gainPct: 0, decodeTokS: 83.9,
+      notice: "Answers are identical to the standard setup.", lastRecheck: null }],
+  });
+  assert.deepEqual(readPresetStatus({}), { state: null, reasons: [], presets: [], switchedOff: false, canUndo: false });
 });

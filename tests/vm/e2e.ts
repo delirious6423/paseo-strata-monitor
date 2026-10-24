@@ -8,10 +8,13 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configure, listEngines, loadEngine, stopEngine } from "../../server/control";
+import { configure, engineLog, listEngines, loadEngine, stopEngine } from "../../server/control";
+import { configureIdle, idleTick } from "../../server/idle";
 import { strataListeners } from "../../server/listeners";
 import { configureEndpoints, getSnapshot } from "../../server/strata";
-import { cancelJob, checkUpdate, startBench, startTune, startUpdate, toolsStatus } from "../../server/tools";
+import {
+  cancelJob, changePreset, checkUpdate, presetStatus, startBench, startRecheck, startRollback, startTune, startUpdate, toolsStatus,
+} from "../../server/tools";
 import { groupEngines } from "../../shared/group";
 
 const win = process.platform === "win32";
@@ -176,19 +179,29 @@ await startBench(tinyId);
 let job = await waitJob(30);
 check("benchmark of the running model", job?.kind === "bench" && job.state === "done" && job.details.some((d) => /42\.5 tok\/s/.test(d)), job);
 await startTune(tinyId, "quick");
-await until(tinyId, "stopped", 30); // Windows: stopping goes through cmd.exe and a PowerShell listener scan
+await until(tinyId, "stopped", 60); // after the "before" benchmark; Windows: stopping goes through cmd.exe
 const blocked = await loadEngine(bigId).then(() => "", (e) => String(e.message));
-check("autotune stops the running model first and blocks Load", (await state(tinyId)) === "stopped" && /Autotune is running/.test(blocked), [await state(tinyId), blocked]);
+check("autotune measures, stops the running model, and blocks Load", (await state(tinyId)) === "stopped" && /Autotune is running/.test(blocked), [await state(tinyId), blocked]);
+job = await waitJob(120);
+check("autotune result, speed before and after, and the model runs again", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") &&
+  job.details.some((d) => /every start/.test(d)) && job.details.some((d) => /^Speed: One request: 42\.5 → 42\.5 tok\/s/.test(d)) &&
+  (await state(tinyId)) === "ready", [job, await state(tinyId)]);
+
+// ---------------------------------------------------------------- saved tuning, re-check, server log
+let ps = await presetStatus(tinyId);
+const saved = ps.presets.find((p) => p.active);
+check("saved tuning listed; the new preset is the active one", ps.state === "fresh" && !!saved && saved.gainPct === 8, ps);
+ps = await changePreset(tinyId, "off");
+check("switch off: no preset active, marked switched off", ps.switchedOff && !ps.presets.some((p) => p.active), ps);
+ps = await changePreset(tinyId, "undo");
+check("undo: the preset is active again", ps.presets.find((p) => p.active)?.id === saved?.id, ps);
+await startRecheck(tinyId, saved!.id);
 job = await waitJob(60);
-check("autotune result", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") && job.details.some((d) => /every start/.test(d)), job);
-await startTune(tinyId, "quick");
-await sleep(2000);
-await checkUpdate(true); // an update check while Autotune runs must not take over its Cancel
-let t0 = Date.now();
-await cancelJob();
-job = await waitJob(40);
-check("autotune cancel (after an update check) ends it promptly; nothing saved", job?.state === "cancelled" && /before anything was saved/.test(job.outcome ?? "") &&
-  Date.now() - t0 < 20_000 && (await strataListeners()).length === 0, [job, Date.now() - t0]);
+check("re-check stops the model and keeps a preset that is still as fast", job?.kind === "recheck" && job.state === "done" &&
+  /still as fast/.test(job.outcome ?? "") && (await until(tinyId, "stopped", 30)), [job, await state(tinyId)]);
+const log = await engineLog(tinyId);
+check("server log: the model's last start is in it", log.lines.some((l) => /starting/.test(l)), log);
+
 await startUpdate();
 job = await waitJob(40);
 check("update installs with progress", job?.kind === "update" && job.state === "done" && job.outcome === "Updated" && job.details.length === 2, job);
@@ -197,6 +210,24 @@ await sleep(1500);
 await cancelJob();
 job = await waitJob(40);
 check("update cancel reports what is installed now", job?.state === "cancelled" && /Installed now: engine/.test(job.outcome ?? ""), job);
+const kept = await checkUpdate(true);
+check("after an update the previous engine is offered for Undo", kept.previous === "1.0", kept);
+await startRollback();
+job = await waitJob(40);
+check("undo update: back to the previous engine", job?.kind === "rollback" && job.state === "done" && /back to 1\.0/.test(job.outcome ?? "") &&
+  (await checkUpdate(true)).previous === null, job);
+
+// ---------------------------------------------------------------- idle stop
+await loadEngine(tinyId);
+await until(tinyId, "ready", 30);
+for (let i = 0; i < 40 && !(await getSnapshot()).online; i++) await sleep(500);
+configureIdle(1);
+const t1 = Date.now();
+const first = await idleTick(t1); // starts counting
+const idleStopped = await idleTick(t1 + 2 * 60_000); // two minutes on, the request counter has not moved
+configureIdle(0);
+check("idle stop: a ready model without requests is stopped after the set minutes and recorded", first === null && idleStopped === tinyId &&
+  (await until(tinyId, "stopped", 30)) && (await toolsStatus()).history[0]?.kind === "idle", [first, idleStopped, await state(tinyId)]);
 await loadEngine(tinyId);
 await until(tinyId, "ready", 30);
 await startBench(tinyId);

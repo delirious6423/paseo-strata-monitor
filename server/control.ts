@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Engine } from "../shared/control";
 import { type Discovery, type Found, discover } from "./discover";
@@ -250,6 +251,7 @@ const stopErrors = new Map<string, string>();
 // A long tool run (autotune, update) owns the GPU and the engine files: no Load meanwhile.
 let busy: string | null = null;
 export const setBusy = (reason: string | null) => void (busy = reason);
+export const isBusy = () => busy !== null;
 
 /** Stop every model that holds the GPU, through the same lock as Load/Stop; refuses if a foreign Strata server
  * runs (it would hold the GPU too). For tools that need the whole GPU. */
@@ -284,6 +286,53 @@ export function readyModel(id: string): Promise<Found> {
 /** Strata's command-line tool for an install, with the environment it needs (a source checkout's .venv). */
 export const strataCommand = (install: string) => ({ cmd: cli(install), env: cliEnv(install) });
 
+/** For the tool that holds the tools slot (autotune's "after" measurement): start a model and wait until it
+ * is ready. Stop still wins (generation), and so does the tool's own Cancel. */
+export async function loadForTool(id: string, aborted: () => boolean, timeoutMs = 15 * 60_000): Promise<void> {
+  stopErrors.delete(id);
+  const asked = gen(id);
+  const stopped = () => aborted() || gen(id) !== asked;
+  await exclusive(() => load(id, stopped, true)).finally(() => invalidateServers());
+  for (const end = Date.now() + timeoutMs; Date.now() < end; await new Promise((ok) => setTimeout(ok, 2000))) {
+    if (stopped()) throw new Error("stopped before it was ready");
+    const e = (await listNow(false)).engines.find((x) => x.id === id);
+    if (e?.state === "ready") return;
+    if (e?.state === "failed" || e?.state === "stopped") throw new Error(e.error ?? `the model ${e.state === "failed" ? "failed to start" : "did not start"}`);
+  }
+  throw new Error(`the model was not ready after ${Math.round(timeoutMs / 60_000)} min`);
+}
+
+/** Where Strata's runtime keeps a profile's server log (strata_control/runtime.py: state_base()/runtime). */
+function runtimeLog(f: Found): string {
+  const env = os.env;
+  const base = env.STRATA_RUNTIME_DIR ?? (os.windows
+    ? join(env.LOCALAPPDATA ?? join(os.home, "AppData", "Local"), "Strata", "runtime")
+    : join(env.XDG_STATE_HOME ?? join(os.home, ".local", "state"), "strata", "runtime"));
+  return join(base, `${profileName(f)}.server.log`);
+}
+
+/** The last lines a model's server wrote while starting or serving: its unit's journal, or Strata's runtime log. */
+export async function engineLog(id: string, lines = 40): Promise<{ source: string; lines: string[] }> {
+  const f = await find(id);
+  if (f.launcher.kind === "systemd") {
+    const out = await run("journalctl", ["--user", `--unit=${f.launcher.unit}`, "-n", String(lines), "--no-pager", "-o", "short-iso"]).catch((e) => String(e.message ?? e));
+    return { source: `journalctl --user -u ${f.launcher.unit}`, lines: out.split("\n").filter((l) => l.trim()).slice(-lines) };
+  }
+  const path = runtimeLog(f);
+  const fh = await open(path, "r").catch(() => null);
+  if (!fh) return { source: path, lines: [] };
+  try {
+    const { size } = await fh.stat();
+    const len = Math.min(size, 64 << 10); // the tail only: a long-running server's log grows
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, size - len);
+    const all = buf.toString("utf8").split(/\r?\n/).filter((l) => l.trim());
+    return { source: path, lines: all.slice(size > len ? 1 : 0).slice(-lines) }; // a cut first line is dropped
+  } finally {
+    await fh.close();
+  }
+}
+
 export function loadEngine(id: string): Promise<void> {
   if (busy) return Promise.reject(new Error(`${busy} is running; cancel it or wait for it to finish`));
   stopErrors.delete(id);
@@ -291,8 +340,8 @@ export function loadEngine(id: string): Promise<void> {
   return exclusive(() => load(id, () => gen(id) !== asked)).finally(() => invalidateServers());
 }
 
-async function load(id: string, aborted: () => boolean): Promise<void> {
-  if (busy) throw new Error(`${busy} is running; cancel it or wait for it to finish`); // admitted before it began
+async function load(id: string, aborted: () => boolean, forTool = false): Promise<void> {
+  if (busy && !forTool) throw new Error(`${busy} is running; cancel it or wait for it to finish`); // admitted before it began
   const f = await find(id);
   const { engines } = await listNow(false); // fresh, not the shared cache
   const active = engines.filter(owns);
