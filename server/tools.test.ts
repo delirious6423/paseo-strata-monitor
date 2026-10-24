@@ -109,7 +109,7 @@ test("jobs own their process: an update check during Autotune does not take over
   const { tmpdir } = await import("node:os");
   const { join, resolve } = await import("node:path");
   const { configure } = await import("./control.ts");
-  const { cancelJob, checkUpdate, configureTools, startBench, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
+  const { cancelJob, checkUpdate, configureTools, disposeTools, startBench, startTools, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
   if (process.platform === "win32") return; // the fake CLI is a sh wrapper here; Windows runs it in the VM tests
   const home = mkdtempSync(join(tmpdir(), "strata-tools-"));
   // A Strata install whose CLI is the fake one, with one model (empty GGUF header) it can tune.
@@ -158,6 +158,11 @@ test("jobs own their process: an update check during Autotune does not take over
     assert.equal(job?.state, "cancelled", JSON.stringify(job));
     assert.ok(Date.now() - t0 < 4000, "Cancel interrupted the tune itself, not the finished check");
     assert.equal((await checkUpdate(true)).engine.offered, "9.9.9"); // no leftover cancel from the last job
+    // Unload, then the host starts the plugin again in the same module instance: the tools work again.
+    disposeTools();
+    await assert.rejects(checkUpdate(true));
+    startTools();
+    assert.equal((await checkUpdate(true)).engine.offered, "9.9.9");
     // A cancelled update says what is installed now (engine and control are not one transaction).
     await startUpdate();
     for (let i = 0; i < 100 && !/Downloading/.test((await toolsStatus()).job?.message ?? ""); i++) await new Promise((r) => setTimeout(r, 100));

@@ -260,9 +260,10 @@ export function freeGpu(aborted: () => boolean = () => false): Promise<void> {
     const foreign = await elsewhere(engines, true);
     if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first`);
     for (const e of engines.filter(owns)) {
-      if (aborted()) return; // cancelled during the scan: leave the user's model running
+      const f = await find(e.id);
+      if (aborted()) return; // cancelled meanwhile: leave the user's model running
       generation.set(e.id, gen(e.id) + 1); // a queued Load must not start it again
-      await stopNow(await find(e.id));
+      await stopNow(f);
     }
   }).finally(() => invalidateServers());
 }

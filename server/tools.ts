@@ -18,10 +18,9 @@ const HISTORY = 20;
 const CHECK_TTL_MS = 60 * 60_000;
 
 let os: Os = here();
-export const configureTools = (o: Os) => {
-  os = o;
-  disposed = false; // a reload into the same module instance starts fresh
-};
+export const configureTools = (o: Os) => void (os = o);
+/** Plugin start: undo a previous unload's block (the host may reuse this module instance). */
+export const startTools = () => void (disposed = false);
 
 /** The job in progress: its cancel request, the CLI doing the work (`exited` once it ended) and every process
  * it started, helpers included, so Cancel and unload reach all of them. */
@@ -136,7 +135,14 @@ function interrupt(p: ChildProcess, onError: (msg: string) => void) {
 export async function cancelJob(): Promise<void> {
   const r = run;
   if (!r || r.job.state !== "running") throw new Error("Nothing is running");
-  if (r.exited) throw new Error("It has already finished; the result is being saved"); // not a cancel any more
+  if (r.exited) {
+    // The work itself is over; only a read-back (what was saved or installed) may still run. Stopping it leaves
+    // the result marked "could not be checked", never a guess.
+    if (!r.procs.size) throw new Error("It has already finished; the result is being saved");
+    r.job.message = "Stopping the check…";
+    for (const p of r.procs) interrupt(p, (msg) => (r.job.message = `Cancel failed: ${msg}`));
+    return;
+  }
   r.cancel = true;
   r.job.message = "Cancelling…";
   for (const p of r.procs) interrupt(p, (msg) => (r.job.message = `Cancel failed: ${msg}`));
@@ -158,11 +164,11 @@ const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update" }
 /** Claim the one tool slot at once (before anything is awaited, so two presses cannot both get it), run
  * `prepare` (its error goes back to the press, nothing is recorded), then `body` in the background. The slot
  * and the Load block are released only by the run that holds them. */
-async function startJob(kind: Job["kind"], prepare: () => Promise<Found | null>,
+async function startJob(kind: Job["kind"], modelId: string | null, prepare: () => Promise<Found | null>,
     body: (r: Run, f: Found | null, poll: (fn: () => Promise<void>) => void) => Promise<void>) {
   if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
   const job: Job = {
-    id: Date.now().toString(36), kind, modelId: null, model: null,
+    id: Date.now().toString(36), kind, modelId, model: null, // the model from the press: Stop finds it while preparing
     startedMs: Date.now(), endedMs: null, state: "running", pct: null, message: "Starting…", minutesLeft: null,
     outcome: null, details: [], error: null,
   };
@@ -235,7 +241,7 @@ setBeforeStop(async (id) => {
 });
 
 export async function startBench(id: string) {
-  await startJob("bench", () => readyModel(id), async (r, model, poll) => {
+  await startJob("bench", id, () => readyModel(id), async (r, model, poll) => {
     const job = r.job;
     const f = model!;
     const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
@@ -300,7 +306,7 @@ export function tuneReport(result: Record<string, any> | null, code: number | nu
 
 export async function startTune(id: string, mode: "quick" | "thorough") {
   const status = join(state(), "tune-status.json");
-  await startJob("tune", () => findModel(id), async (r, model, poll) => {
+  await startJob("tune", id, () => findModel(id), async (r, model, poll) => {
     const job = r.job;
     const f = model!;
     const install = await installFor(f);
@@ -379,7 +385,7 @@ export function updateEvent(job: Job, ev: Record<string, any>) {
 }
 
 export async function startUpdate() {
-  await startJob("update", async () => null, async (r) => {
+  await startJob("update", null, async () => null, async (r) => {
     const job = r.job;
     const install = await installFor();
     if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });

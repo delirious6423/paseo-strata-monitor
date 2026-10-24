@@ -1,12 +1,13 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { configure, knownPorts, listEngines, loadEngine, stopEngine } from "./server/control";
 import { configureEndpoints, getSnapshot } from "./server/strata";
-import { cancelJob, checkUpdate, disposeTools, startBench, startTune, startUpdate, toolsStatus } from "./server/tools";
+import { cancelJob, checkUpdate, disposeTools, startBench, startTune, startUpdate, startTools, toolsStatus } from "./server/tools";
 import { discoverySettings, strataEngines, strataLoad, strataStop } from "./shared/control";
 import { strataSnapshot } from "./shared/strata";
 import { strataBench, strataCancel, strataTools, strataTune, strataUpdate, strataUpdateCheck } from "./shared/tools";
 
 export default function contribute(server: PluginServerContext) {
+  startTools(); // a reload into the same module instance starts with the tools usable again
   const settings = server.registerSettings(discoverySettings);
   const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
     if (state.status !== "ready") return;
