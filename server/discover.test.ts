@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { groupEngines } from "../shared/group.ts";
 import { parseShow } from "./control.ts";
-import { configFromScript, discover, splitExec } from "./discover.ts";
+import { configFromScript, discover, serverFromScript, splitExec } from "./discover.ts";
 import { parseGgufHeader } from "./gguf.ts";
 import { parseLsof, parseProcNet, STRATA_SERVER } from "./listeners.ts";
 import { fileStem, frontMatter, hfRepo } from "./models.ts";
@@ -278,4 +278,25 @@ test("EXL3 bits from the head of a quantization_config.json far larger than the 
   o.env.STRATA_INSTALL_DIR = inst;
   const [m] = (await discover(o)).models;
   assert.equal(m?.quant, "EXL3 2.66 bpw h6");
+});
+
+test("server file from a start script, and whether that server keeps an autotune result", async () => {
+  assert.equal(serverFromScript(`B=/x\ncd "$B/source"\nexec "$B/py" -m serve.server --config c.json`, "/"), "/x/source/serve/server.py");
+  assert.equal(serverFromScript(`cd /w\nexec "/s/.venv/bin/python" "/s/serve/server.py" --config c.json`, "/"), "/s/serve/server.py");
+  assert.equal(serverFromScript(`# cd /old\nexec python serve/server.py`, "/d"), "/d/serve/server.py");
+  assert.equal(serverFromScript(`exec llama-server -m x.gguf`, "/"), null);
+  const { home, o } = machine();
+  const units = join(home, ".config/systemd/user");
+  mkdirSync(units, { recursive: true });
+  for (const [name, applies] of [["new", true], ["fork", false]] as const) {
+    const dir = join(home, name);
+    mkdirSync(join(dir, "serve"), { recursive: true });
+    writeFileSync(join(dir, "serve", "server.py"), applies ? "def apply_saved_tuning(cfg: dict) -> dict:\n    ...\n" : "def main(): ...\n");
+    writeFileSync(join(dir, "m.gguf"), gguf([]));
+    writeFileSync(join(dir, "cfg.json"), JSON.stringify({ exe: join(dir, "engine"), args: ["--native", join(dir, "m.gguf")], model_name: name }));
+    writeFileSync(join(dir, "run.sh"), `#!/bin/sh\ncd ${dir}\nexec /py -m serve.server --config ${dir}/cfg.json\n`);
+    writeFileSync(join(units, `${name}.service`), `[Service]\nExecStart=${dir}/run.sh\n`);
+  }
+  const d = await discover(o);
+  assert.deepEqual(d.models.map((m) => [m.id, m.keepsTuning]).sort(), [["unit:fork.service", false], ["unit:new.service", true]]);
 });

@@ -1,6 +1,7 @@
 // JavaScript, run by node, named like Strata's serve/server.py so its command line looks like a Strata server
 // to the plugin's listener scan. Stand-in for the VM tests: after a simulated 2 s load it serves / and a
-// Strata-shaped /health and /metrics on --port.
+// Strata-shaped /health and /metrics on --port. Like Strata's def apply_saved_tuning(cfg) it would apply saved
+// tuning at start; the fake has none to apply.
 const { readFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 

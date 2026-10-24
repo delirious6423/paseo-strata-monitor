@@ -26,18 +26,18 @@ Strata. Analytics get no configured ports, so they must find servers by scanning
 loads at once (exactly one model runs), Abort while the Load is still stopping the previous model (nothing
 starts), and Load refusing while a Strata server the plugin did not start is running. Tools: update check, a
 benchmark of the running model, autotune (stops the model, blocks Load, result), autotune Cancel, and an update
-with progress, against the fake CLI's `bench`/`tune`/`update`. 28 checks.
+with progress, against the fake CLI's `bench`/`tune`/`update`. 29 checks.
 
 The VM runners come from the dotfiles repo (`DOTFILES_ROOT`, default `~/code/dotfiles`); each refuses to touch an
 existing run and discards its own VM afterwards.
 
 | Target | Command | Last result (2026-10-24) |
 |---|---|---|
-| Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 28/28 |
-| Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 28/28 |
-| Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 28/28 |
-| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 28/28 (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
-| macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 28/28 |
+| Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 29/29 |
+| Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 28/28 (29th check not yet run there) |
+| Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 28/28 (29th check not yet run there) |
+| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 29/29 (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
+| macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 28/28 (29th check not yet run there) |
 
 Known flake: on the emulated Windows ARM64 VM, PowerShell's first start can exceed the listener scan's 8 s
 timeout, so that one scan comes back empty; the next scan (10 s later) finds the server. On such a slow machine

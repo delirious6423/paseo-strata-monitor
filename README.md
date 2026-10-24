@@ -59,7 +59,7 @@ All three use the Strata command-line tool of the first Strata install that has 
 - Autotune: `strata tune auto <run config> --mode quick --status-file …`. Undo a saved preset with
   `strata presets undo` or `strata presets off`. The result is remembered: Strata's server applies the saved preset
   at every start (its log says `saved tuning '…' applied`), so autotune once per model, and again after a new
-  engine, driver or GPU. Only a server built from Strata's source applies presets; a custom fork may not.
+  engine, driver or GPU. Only a server with Strata's preset support applies them (`apply_saved_tuning` in its `serve/server.py`); for a model whose server lacks it, the screen warns that a result would not be used.
 - Update: `strata update --check`, then `strata update --output jsonl --wait 0`. Strata switches to a new engine
   only after a test start and keeps the previous one (`strata components rollback`). An update installs into
   Strata's component folder; a run config that starts its own engine file is not changed, and the screen says so.

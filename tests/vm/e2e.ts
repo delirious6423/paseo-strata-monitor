@@ -106,6 +106,7 @@ check("GGUF metadata: provider, family, quant", tiny?.provider === "TestQuant" &
 check("split GGUF size summed", (big?.sizeBytes ?? 0) > 3_000_000, big?.sizeBytes);
 check("launchers", !!tiny?.launcher.startsWith("Strata runtime") && !!big?.launcher.startsWith(linux ? "systemd" : "Strata runtime"), [tiny?.launcher, big?.launcher]);
 check("Strata settings place searched", places.some((p) => p.source === "Strata settings" && p.models === (linux ? 1 : 2)), places);
+check("autotune result kept: the fake install's server applies saved tuning", engines.every((e) => e.keepsTuning === true), engines.map((e) => e.keepsTuning));
 check("picker: smallest model's group first", groupEngines(engines)[0]?.engines[0]?.id === tinyId, groupEngines(engines).map((g) => g.title));
 
 const before = await getSnapshot();

@@ -85,10 +85,16 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       <Text style={[styles.label, { fontSize: 12 }]}>Tools · {sel.provider} {sel.quant}</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {button("Benchmark", () => act.mutate(() => bench({ id: sel.id })), { disabled: busy || sel.state !== "ready" })}
-        {button(confirm === "tune" ? "Press again: stops the model, ~20 min" : "Autotune",
+        {button(confirm === "tune" ? `Press again: stops the model, ~20 min${sel.keepsTuning === false ? ", result not kept" : ""}` : "Autotune",
           () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: "quick" }))), { disabled: busy, warn: confirm === "tune" })}
         {button(checking.isPending ? "Checking…" : "Check for updates", () => checking.mutate(), { disabled: busy || checking.isPending })}
       </View>
+      {sel.keepsTuning === false ? (
+        <Text style={{ color: c.statusWarning, fontSize: 12 }}>
+          This model's server does not apply saved tuning (it runs a Strata copy without presets), so an Autotune result
+          would not be used when it starts. Benchmark still works.
+        </Text>
+      ) : null}
       {sel.state !== "ready" && !running ? (
         <Text style={[styles.label, { fontSize: 12 }]}>Benchmark measures the running model: load it first.</Text>
       ) : null}

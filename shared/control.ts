@@ -27,6 +27,8 @@ export const engineSchema = z.object({
   config: z.string(),
   launcher: z.string(),
   source: z.string(),
+  /** The model's server applies Strata's saved tuning at start; false: an autotune result is not used. */
+  keepsTuning: z.boolean().nullable(),
   state: z.enum(["stopped", "loading", "ready", "stopping", "failed"]),
   sinceMs: z.number().nullable(),
   error: z.string().nullable(),

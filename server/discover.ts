@@ -15,7 +15,8 @@ export type Launcher =
   | { kind: "systemd"; unit: string }
   | { kind: "strata"; install: string };
 
-export type Found = ModelCard & { id: string; config: string; launcher: Launcher; source: string };
+/** `keepsTuning`: the server that runs it applies Strata's saved tuning at start (null: its server is unknown). */
+export type Found = ModelCard & { id: string; config: string; launcher: Launcher; source: string; keepsTuning: boolean | null };
 export type Place = { path: string; source: string; models: number; note?: string };
 export type Discovery = { models: Found[]; places: Place[] };
 
@@ -58,8 +59,10 @@ export function splitExec(value: string): string[] {
 const expandSpecifiers = (s: string, home: string, instance: string | null) =>
   s.replace(/%%|%h|%i|%I/g, (t) => (t === "%%" ? "%" : t === "%h" ? home : instance ?? t));
 
-/** Shell script: the `--config` path it passes, with simple `NAME=value` / `export NAME=value` variables expanded. */
-export function configFromScript(text: string, scriptDir: string, env: Record<string, string | undefined> = {}): string | null {
+/** Walk a shell script's lines with simple `NAME=value` / `export NAME=value` variables expanded and `cd` followed;
+ * the first value `pick` returns for a line wins. */
+function walkScript(text: string, scriptDir: string, env: Record<string, string | undefined>,
+    pick: (line: string, cwd: string, sub: (v: string) => string, unq: (v: string) => string) => string | null): string | null {
   const vars: Record<string, string> = {};
   let cwd = scriptDir;
   const unq = (v: string) => v.trim().replace(/^"(.*)"$|^'(.*)'$/, "$1$2");
@@ -73,39 +76,77 @@ export function configFromScript(text: string, scriptDir: string, env: Record<st
     }
     const cd = /^\s*cd\s+(.+?)\s*(?:&&.*)?$/.exec(line);
     if (cd) cwd = resolve(cwd, sub(unq(cd[1]!)));
-    const cfg = /--config["']?(?:=|\s+)("[^"]+"|'[^']+'|[^\s"']+)/.exec(line);
-    if (cfg) {
-      const p = sub(unq(cfg[1]!));
-      return isAbsolute(p) ? p : resolve(cwd, p);
-    }
+    const hit = pick(line, cwd, sub, unq);
+    if (hit) return hit;
   }
   return null;
 }
 
-async function configForArgv(argv: string[], env: Os["env"]): Promise<string | null> {
-  const i = argv.findIndex((a) => a === "--config" || a.startsWith("--config="));
-  if (i >= 0) return argv[i]!.includes("=") ? argv[i]!.split("=", 2)[1]! : argv[i + 1] ?? null;
-  const script = argv[0];
+/** Shell script: the `--config` path it passes. */
+export function configFromScript(text: string, scriptDir: string, env: Record<string, string | undefined> = {}): string | null {
+  return walkScript(text, scriptDir, env, (line, cwd, sub, unq) => {
+    const cfg = /--config["']?(?:=|\s+)("[^"]+"|'[^']+'|[^\s"']+)/.exec(line);
+    if (!cfg) return null;
+    const p = sub(unq(cfg[1]!));
+    return isAbsolute(p) ? p : resolve(cwd, p);
+  });
+}
+
+/** Shell script: the Strata server file it runs (`python path/serve/server.py`, or `-m serve.server` after a `cd`). */
+export function serverFromScript(text: string, scriptDir: string, env: Record<string, string | undefined> = {}): string | null {
+  return walkScript(text, scriptDir, env, (line, cwd, sub, unq) => {
+    if (/^\s*cd\s/.test(line)) return null;
+    const file = /("[^"]*serve[\/\\]server\.py"|'[^']*serve[\/\\]server\.py'|[^\s"']*serve[\/\\]server\.py)/.exec(line);
+    if (file) return resolve(cwd, sub(unq(file[1]!)));
+    return /(?:^|\s)-m\s+serve\.server(?:\s|$)/.test(line) ? join(cwd, "serve", "server.py") : null;
+  });
+}
+
+/** The server file a unit's command runs: named in the command itself, else in the script it starts. */
+async function serverForArgv(argv: string[], env: Os["env"]): Promise<string | null> {
+  const named = argv.find((a) => /serve[\/\\]server\.py$/.test(a) && isAbsolute(a));
+  if (named) return named;
+  const text = await scriptText(argv[0]);
+  return text === null ? null : serverFromScript(text, dirname(argv[0]!), env);
+}
+
+async function scriptText(script: string | undefined): Promise<string | null> {
   if (!script || !isAbsolute(script)) return null;
   const st = await stat(script).catch(() => null);
   if (!st?.isFile() || st.size > 64 << 10) return null;
   const text = await readFile(script, "utf8").catch(() => "");
-  if (text.startsWith("\x7fELF") || text.includes("\0")) return null;
-  return configFromScript(text, dirname(script), env);
+  return text.startsWith("\x7fELF") || text.includes("\0") ? null : text;
 }
 
-export async function systemdUnits(o: Os): Promise<{ unit: string; config: string }[]> {
+/** Whether a Strata server source applies saved tuning at start (Strata's `apply_saved_tuning`, serve/server.py).
+ * Copies built before presets, or forks without them, start every time with the run config as written. */
+const keepsTuning = async (server: string | null): Promise<boolean | null> => {
+  if (!server) return null;
+  const text = await readFile(server, "utf8").catch(() => null);
+  return text === null ? null : /def apply_saved_tuning\(/.test(text);
+};
+
+async function configForArgv(argv: string[], env: Os["env"]): Promise<string | null> {
+  const i = argv.findIndex((a) => a === "--config" || a.startsWith("--config="));
+  if (i >= 0) return argv[i]!.includes("=") ? argv[i]!.split("=", 2)[1]! : argv[i + 1] ?? null;
+  const text = await scriptText(argv[0]);
+  return text === null ? null : configFromScript(text, dirname(argv[0]!), env);
+}
+
+export async function systemdUnits(o: Os): Promise<{ unit: string; config: string; server: string | null }[]> {
   if (o.windows || process.platform === "darwin") return [];
   const dir = systemdUserDir(o);
-  const out: { unit: string; config: string }[] = [];
+  const out: { unit: string; config: string; server: string | null }[] = [];
+  const env = { HOME: o.home, ...o.env };
   for (const file of await list(dir)) {
     if (!file.endsWith(".service")) continue;
     const text = await readFile(join(dir, file), "utf8").catch(() => "");
     const exec = /^\s*ExecStart\s*=\s*(.+)$/m.exec(text)?.[1];
     if (!exec) continue;
     if (!file.endsWith("@.service")) {
-      const config = await configForArgv(splitExec(expandSpecifiers(exec, o.home, null)), { HOME: o.home, ...o.env });
-      if (config) out.push({ unit: file, config });
+      const argv = splitExec(expandSpecifiers(exec, o.home, null));
+      const config = await configForArgv(argv, env);
+      if (config) out.push({ unit: file, config, server: await serverForArgv(argv, env) });
       continue;
     }
     // Template: instances are the values of %i that make its command's file exist (e.g. run-%i.sh).
@@ -119,8 +160,9 @@ export async function systemdUnits(o: Os): Promise<{ unit: string; config: strin
       if (!name.startsWith(pre) || !name.endsWith(post) || name.length <= pre.length + post.length) continue;
       const instance = name.slice(pre.length, name.length - post.length);
       if (!/^[A-Za-z0-9_.-]+$/.test(instance)) continue;
-      const config = await configForArgv(splitExec(expandSpecifiers(exec, o.home, instance)), { HOME: o.home, ...o.env });
-      if (config) out.push({ unit: file.replace("@.service", `@${instance}.service`), config });
+      const argv = splitExec(expandSpecifiers(exec, o.home, instance));
+      const config = await configForArgv(argv, env);
+      if (config) out.push({ unit: file.replace("@.service", `@${instance}.service`), config, server: await serverForArgv(argv, env) });
     }
   }
   return out;
@@ -137,7 +179,7 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
 
   let skipped = 0;
   const unreadable = () => (skipped ? `${skipped} JSON file${skipped === 1 ? "" : "s"} skipped: not a readable Strata run config` : undefined); // configs that could not be read, per place (reset by each place)
-  const addConfig = async (config: string, launcher: Launcher | null, source: string): Promise<boolean> => {
+  const addConfig = async (config: string, launcher: Launcher | null, source: string, server?: string | null): Promise<boolean> => {
     const key = await real(config);
     if (byConfig.has(key)) return false;
     const rc = await readRunConfig(config);
@@ -153,7 +195,8 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
     const id = chosen.kind === "systemd" ? `unit:${chosen.unit}` : `cfg:${slug(basename(config, ".json").replace(/^strata-/, "")).slice(0, 40)}-${tag}`;
     let unique = id;
     for (let n = 2; [...byConfig.values()].some((f) => f.id === unique); n++) unique = `${id}-${n}`;
-    byConfig.set(key, { ...card, id: unique, config, launcher: chosen, source });
+    const runs = chosen.kind === "strata" ? join(chosen.install, "serve", "server.py") : server ?? null;
+    byConfig.set(key, { ...card, id: unique, config, launcher: chosen, source, keepsTuning: await keepsTuning(runs) });
     return true;
   };
 
@@ -161,7 +204,7 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
     const units = await systemdUnits(o);
     let n = 0;
     skipped = 0;
-    for (const u of units) if (await addConfig(u.config, { kind: "systemd", unit: u.unit }, `service ${u.unit}`)) n++;
+    for (const u of units) if (await addConfig(u.config, { kind: "systemd", unit: u.unit }, `service ${u.unit}`, u.server)) n++;
     places.push({ path: systemdUserDir(o), source: "systemd user services", models: n, note: unreadable() });
   }
   for (const p of await installPlaces(o)) {

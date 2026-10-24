@@ -211,7 +211,7 @@ async function listNow(rescan: boolean): Promise<Listing> {
       if (stopErrors.has(f.id) && state !== "stopped") error = `Stop failed: ${stopErrors.get(f.id)}`;
       return {
         id: f.id, name: f.name, family: f.family, provider: f.provider, quant: f.quant, format: f.format, sizeBytes: f.sizeBytes,
-        port: f.port, config: f.config, launcher: launcherLabel(f), source: f.source, state, sinceMs, error,
+        port: f.port, config: f.config, launcher: launcherLabel(f), source: f.source, keepsTuning: f.keepsTuning, state, sinceMs, error,
       };
     }),
   );
