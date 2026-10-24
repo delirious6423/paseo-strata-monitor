@@ -260,6 +260,7 @@ export function freeGpu(aborted: () => boolean = () => false): Promise<void> {
     const foreign = await elsewhere(engines, true);
     if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first`);
     for (const e of engines.filter(owns)) {
+      if (aborted()) return; // cancelled during the scan: leave the user's model running
       generation.set(e.id, gen(e.id) + 1); // a queued Load must not start it again
       await stopNow(await find(e.id));
     }
@@ -268,15 +269,13 @@ export function freeGpu(aborted: () => boolean = () => false): Promise<void> {
 
 export { find as findModel };
 
-/** Ready-and-reserved: under the Load/Stop lock, the model is ready and the tool is marked busy before any
- * queued Load can run (a benchmark must not have its model switched underneath). */
-export function reserveReady(id: string, reason: string): Promise<Found> {
+/** The model is ready, checked under the Load/Stop lock: after any Load queued earlier has run. The caller
+ * has already marked the tools busy, so no later Load can switch it underneath. */
+export function readyModel(id: string): Promise<Found> {
   return exclusive(async () => {
-    if (busy) throw new Error(`${busy} is running; cancel it or wait for it to finish`);
     const f = await find(id);
     const e = (await listNow(false)).engines.find((x) => x.id === id);
     if (e?.state !== "ready") throw new Error("Load this model first: the benchmark measures the running server");
-    busy = reason;
     return f;
   });
 }

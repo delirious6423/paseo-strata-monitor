@@ -109,7 +109,7 @@ test("jobs own their process: an update check during Autotune does not take over
   const { tmpdir } = await import("node:os");
   const { join, resolve } = await import("node:path");
   const { configure } = await import("./control.ts");
-  const { cancelJob, checkUpdate, configureTools, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
+  const { cancelJob, checkUpdate, configureTools, startBench, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
   if (process.platform === "win32") return; // the fake CLI is a sh wrapper here; Windows runs it in the VM tests
   const home = mkdtempSync(join(tmpdir(), "strata-tools-"));
   // A Strata install whose CLI is the fake one, with one model (empty GGUF header) it can tune.
@@ -141,7 +141,15 @@ test("jobs own their process: an update check during Autotune does not take over
     throw new Error("the job did not end");
   };
   try {
-    await startTune(id!, "quick"); // the fake tune takes about 5 s
+    // Benchmark and Autotune pressed together: the benchmark holds the slot from the press, so Autotune is
+    // refused; the benchmark then fails (no model running) and gives the slot back, Load block included.
+    const mixed = await Promise.allSettled([startBench(id!), startTune(id!, "quick")]);
+    assert.deepEqual(mixed.map((m) => (m.status === "rejected" ? String(m.reason?.message) : "ok")),
+      ["Load this model first: the benchmark measures the running server", "A benchmark is already running"]);
+    assert.equal((await toolsStatus()).job, null);
+    // Two presses at once (two clients): one tune starts, the other is refused.
+    const both = await Promise.allSettled([startTune(id!, "quick"), startTune(id!, "quick")]); // the fake tune takes about 5 s
+    assert.deepEqual(both.map((b) => b.status).sort(), ["fulfilled", "rejected"]);
     for (let i = 0; i < 100 && !/Round/.test((await toolsStatus()).job?.message ?? ""); i++) await new Promise((r) => setTimeout(r, 100));
     await checkUpdate(true); // a check that starts and ends while Autotune runs
     const t0 = Date.now();

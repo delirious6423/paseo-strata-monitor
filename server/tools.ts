@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { type Job, type UpdateCheck, jobSchema } from "../shared/tools";
-import { cmdExeLine, discovery, findModel, freeGpu, reserveReady, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
+import { cmdExeLine, discovery, findModel, freeGpu, readyModel, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
 import type { Found } from "./discover";
 import { installPlaces } from "./discover";
 import { type Os, cliIn, componentsDir, here, pluginStateDir } from "./places";
@@ -18,10 +18,14 @@ const HISTORY = 20;
 const CHECK_TTL_MS = 60 * 60_000;
 
 let os: Os = here();
-export const configureTools = (o: Os) => void (os = o);
+export const configureTools = (o: Os) => {
+  os = o;
+  disposed = false; // a reload into the same module instance starts fresh
+};
 
-/** The job in progress, with its own process and cancel request. */
-type Run = { job: Job; cancel: boolean; proc: ChildProcess | null };
+/** The job in progress: its cancel request, the CLI doing the work (`exited` once it ended) and every process
+ * it started, helpers included, so Cancel and unload reach all of them. */
+type Run = { job: Job; cancel: boolean; procs: Set<ChildProcess>; exited: boolean };
 let run: Run | null = null;
 let history: Job[] | null = null;
 const checks = new Set<ChildProcess>(); // update checks in flight (they are not jobs)
@@ -59,7 +63,7 @@ async function installFor(f?: Found): Promise<string> {
   return places.find((p) => existsSync(cliIn(p.path, os)))?.path ?? places[0]?.path ?? os.home;
 }
 
-type Ctx = { stop: () => boolean; started: (p: ChildProcess) => void; done?: (p: ChildProcess) => void };
+type Ctx = { stop: () => boolean; started: (p: ChildProcess) => void; done?: (p: ChildProcess) => void; timeoutMs?: number };
 type Exit = { code: number | null; lines: string[]; err: string };
 
 /** Start Strata's CLI unless the run was cancelled meanwhile (checked right before spawning). */
@@ -71,6 +75,8 @@ async function launch(install: string, args: string[], ctx: Ctx, onLine: (line: 
     ? spawn("cmd.exe", ["/d", "/s", "/c", cmdExeLine(cmd, args)], { ...opts, windowsVerbatimArguments: true })
     : spawn(cmd, args, opts);
   ctx.started(p);
+  // Read-only helpers (preset list, update check) get a time limit: a stalled one must not hold the tools.
+  const limit = ctx.timeoutMs ? setTimeout(() => interrupt(p, () => {}), ctx.timeoutMs) : null;
   const lines: string[] = [];
   let err = "";
   let buf = "";
@@ -89,6 +95,7 @@ async function launch(install: string, args: string[], ctx: Ctx, onLine: (line: 
   return new Promise((finish) => {
     p.on("error", (e) => finish({ code: -1, lines, err: String(e.message) }));
     p.on("close", (code) => {
+      if (limit) clearTimeout(limit);
       if (buf.trim()) lines.push(buf.trim());
       ctx.done?.(p);
       finish({ code, lines, err });
@@ -129,10 +136,11 @@ function interrupt(p: ChildProcess, onError: (msg: string) => void) {
 export async function cancelJob(): Promise<void> {
   const r = run;
   if (!r || r.job.state !== "running") throw new Error("Nothing is running");
+  if (r.exited) throw new Error("It has already finished; the result is being saved"); // not a cancel any more
   r.cancel = true;
   r.job.message = "Cancelling…";
-  if (r.proc) interrupt(r.proc, (msg) => (r.job.message = `Cancel failed: ${msg}`));
-  // else: still preparing; the CLI will not be started
+  for (const p of r.procs) interrupt(p, (msg) => (r.job.message = `Cancel failed: ${msg}`));
+  // nothing started yet: still preparing, and the CLI will not be started
 }
 
 /** Plugin unload: cancel the job (preparing or running) and any update check, so nothing keeps the GPU. */
@@ -140,28 +148,45 @@ export function disposeTools() {
   disposed = true;
   if (run) {
     run.cancel = true;
-    if (run.proc) interrupt(run.proc, () => {});
+    for (const p of run.procs) interrupt(p, () => {});
   }
   for (const p of checks) interrupt(p, () => {});
 }
 
 const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update" } as const;
 
-/** Run one job; `reserved`: the caller already marked the tools busy (benchmark, under the Load/Stop lock). */
-function startJob(kind: Job["kind"], f: Found | null, body: (r: Run, poll: (fn: () => Promise<void>) => void) => Promise<void>, reserved = false) {
+/** Claim the one tool slot at once (before anything is awaited, so two presses cannot both get it), run
+ * `prepare` (its error goes back to the press, nothing is recorded), then `body` in the background. The slot
+ * and the Load block are released only by the run that holds them. */
+async function startJob(kind: Job["kind"], prepare: () => Promise<Found | null>,
+    body: (r: Run, f: Found | null, poll: (fn: () => Promise<void>) => void) => Promise<void>) {
+  if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
   const job: Job = {
-    id: Date.now().toString(36), kind, modelId: f?.id ?? null, model: f ? `${f.provider} ${f.quant}` : null,
+    id: Date.now().toString(36), kind, modelId: null, model: null,
     startedMs: Date.now(), endedMs: null, state: "running", pct: null, message: "Starting…", minutesLeft: null,
     outcome: null, details: [], error: null,
   };
-  const r: Run = { job, cancel: false, proc: null };
+  const r: Run = { job, cancel: false, procs: new Set(), exited: false };
   run = r;
-  if (!reserved) setBusy(busyName[kind]);
+  setBusy(busyName[kind]);
+  const release = () => {
+    if (run !== r) return;
+    run = null;
+    setBusy(null);
+  };
+  let f: Found | null;
+  try {
+    f = await prepare();
+  } catch (e) {
+    release();
+    throw e;
+  }
+  Object.assign(job, { modelId: f?.id ?? null, model: f ? `${f.provider} ${f.quant}` : null });
   let timer: NodeJS.Timeout | null = null;
   const poll = (fn: () => Promise<void>) => void (timer = setInterval(() => void fn().catch(() => {}), 1000));
   void (async () => {
     try {
-      await body(r, poll);
+      await body(r, f, poll);
     } catch (e) {
       job.state = "failed";
       job.error = String((e as Error).message ?? e).slice(0, 300);
@@ -170,19 +195,20 @@ function startJob(kind: Job["kind"], f: Found | null, body: (r: Run, poll: (fn: 
       if (job.state === "running") job.state = "done";
       job.endedMs = Date.now();
       job.minutesLeft = null;
-      setBusy(null);
-      const h = await loadHistory();
-      history = [job, ...h].slice(0, HISTORY);
-      if (run === r) run = null;
+      history = [job, ...(await loadHistory())].slice(0, HISTORY);
+      release();
       await saveHistory().catch(() => {});
     }
   })();
 }
 
-const ensureIdle = () => {
-  if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
-};
-const jobCtx = (r: Run): Ctx => ({ stop: () => r.cancel, started: (p) => (r.proc = p), done: () => (r.proc = null) });
+/** The job's own CLI: Cancel interrupts it; once it ended, Cancel has nothing left to stop. */
+const jobCtx = (r: Run): Ctx => ({ stop: () => r.cancel, started: (p) => r.procs.add(p), done: (p) => {
+  r.procs.delete(p);
+  r.exited = true;
+} });
+/** A short read-only helper for the job (runs also after a cancel, to find out what changed), time-limited. */
+const helperCtx = (r: Run): Ctx => ({ stop: () => disposed, started: (p) => r.procs.add(p), done: (p) => r.procs.delete(p), timeoutMs: 60_000 });
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 const n = (v: unknown, digits = 1) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "–");
 
@@ -199,26 +225,20 @@ export function benchLines(summary: Record<string, any>): string[] {
       (p.failed ? `, ${p.failed} failed` : ""));
 }
 
-// Stop on the benchmarked model cancels the benchmark first (it would only fail half-way).
+// Stop on the benchmarked model cancels the benchmark and waits for it to end (Ctrl+C, then a kill after 30 s).
 setBeforeStop(async (id) => {
   const r = run;
   if (!r || r.job.kind !== "bench" || r.job.modelId !== id) return;
   await cancelJob().catch(() => {});
-  for (let i = 0; i < 100 && run === r; i++) await new Promise((ok) => setTimeout(ok, 100));
+  for (let i = 0; i < 350 && run === r; i++) await new Promise((ok) => setTimeout(ok, 100));
+  if (run === r) throw new Error("The benchmark of this model is still stopping; try again in a moment");
 });
 
 export async function startBench(id: string) {
-  ensureIdle();
-  const f = await reserveReady(id, busyName.bench); // under the Load/Stop lock: no switch underneath
-  try {
-    ensureIdle();
-  } catch (e) {
-    setBusy(null);
-    throw e;
-  }
-  const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
-  startJob("bench", f, async (r, poll) => {
+  await startJob("bench", () => readyModel(id), async (r, model, poll) => {
     const job = r.job;
+    const f = model!;
+    const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
     await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
     job.message = "Warming up";
     poll(async () => {
@@ -240,15 +260,15 @@ export async function startBench(id: string) {
     job.details = benchLines(res.summary);
     job.outcome = res.ok ? "Finished" : "Finished with failed requests";
     if (typeof res.path === "string") job.details.push(`Report: ${res.path}`);
-  }, true);
+  });
 }
 
 // ------------------------------------------------------------------------------------------- autotune
 
 /** Saved presets (id -> name), or null if Strata could not list them. Read before and after a tune: what a
  * tune saved is what appeared, whatever its output said or failed to say. */
-async function presetNames(install: string): Promise<Map<string, string> | null> {
-  const x = await launch(install, ["presets", "list", "--output", "json"], { stop: () => disposed, started: () => {} }).catch(() => null);
+async function presetNames(install: string, r: Run): Promise<Map<string, string> | null> {
+  const x = await launch(install, ["presets", "list", "--output", "json"], helperCtx(r)).catch(() => null);
   const res = x && lastJson(x.lines);
   if (!res?.ok || !Array.isArray(res.presets)) return null;
   return new Map(res.presets.flatMap((p: any) => (typeof p?.id === "string" ? [[p.id, String(p.name ?? p.id)]] : [])));
@@ -279,15 +299,14 @@ export function tuneReport(result: Record<string, any> | null, code: number | nu
 }
 
 export async function startTune(id: string, mode: "quick" | "thorough") {
-  ensureIdle();
-  const f = await findModel(id);
   const status = join(state(), "tune-status.json");
-  startJob("tune", f, async (r, poll) => {
+  await startJob("tune", () => findModel(id), async (r, model, poll) => {
     const job = r.job;
+    const f = model!;
     const install = await installFor(f);
     await mkdir(state(), { recursive: true, mode: 0o700 });
     await rm(status, { force: true });
-    const before = await presetNames(install);
+    const before = await presetNames(install, r);
     if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
     job.message = "Stopping the running model";
     await freeGpu(() => r.cancel);
@@ -299,7 +318,8 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
       job.minutesLeft = typeof st.minutes_left === "number" ? st.minutes_left : null;
     });
     const x = await launch(install, ["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], jobCtx(r));
-    const after = await presetNames(install);
+    job.message = "Checking what was saved";
+    const after = await presetNames(install, r);
     const result = lastJson(x.lines)?.result ?? null;
     // Strata names the preset it saved; when its output is missing (cancelled late), compare the lists.
     const named = typeof result?.preset?.name === "string" ? [result.preset.name] : null;
@@ -337,10 +357,10 @@ export async function checkUpdate(force = false): Promise<UpdateCheck> {
   return readInstalled();
 }
 
-/** `strata update --check` now (also how a cancelled update finds out what it left installed). */
-async function readInstalled(): Promise<UpdateCheck> {
-  const x = await launch(await installFor(), ["update", "--check", "--output", "json"],
-    { stop: () => disposed, started: (p) => checks.add(p), done: (p) => checks.delete(p) });
+/** `strata update --check` now (also how a cancelled update finds out what it left installed), time-limited. */
+async function readInstalled(r?: Run): Promise<UpdateCheck> {
+  const ctx: Ctx = r ? helperCtx(r) : { stop: () => disposed, started: (p) => checks.add(p), done: (p) => checks.delete(p), timeoutMs: 60_000 };
+  const x = await launch(await installFor(), ["update", "--check", "--output", "json"], ctx);
   const res = lastJson(x.lines);
   if (!res?.ok) throw new Error(why(x, res));
   const engines = (await discovery()).models.map((m) => m.engine);
@@ -358,9 +378,8 @@ export function updateEvent(job: Job, ev: Record<string, any>) {
   }
 }
 
-export function startUpdate() {
-  ensureIdle();
-  startJob("update", null, async (r) => {
+export async function startUpdate() {
+  await startJob("update", async () => null, async (r) => {
     const job = r.job;
     const install = await installFor();
     if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
@@ -377,13 +396,14 @@ export function startUpdate() {
     if (results) job.details = results.map((c: any) => `${c.component}: ${c.status}${c.version ? ` ${c.version}` : ""}${c.error ? ` (${String(c.error).slice(0, 120)})` : ""}`);
     if (r.cancel) {
       // Engine and control install separately and one is not undone if the other stops: say what is installed now.
-      job.state = "cancelled";
+      job.message = "Checking what is installed now";
       try {
-        const now = await readInstalled();
+        const now = await readInstalled(r);
         job.outcome = `Cancelled. Installed now: engine ${now.engine.installed ?? "none"}, control ${now.control.installed ?? "none"}`;
       } catch {
         job.outcome = "Cancelled; the installed versions could not be checked (strata update --check)";
       }
+      job.state = "cancelled";
       return;
     }
     if (!results) throw new Error(why(x, res));
