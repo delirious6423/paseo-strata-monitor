@@ -9,7 +9,7 @@ the Strata models on your machine, load or stop one with a click, and watch the 
 - **Tools** for the selected model, through Strata's own command-line tool: **Benchmark** (Strata's quick
   serving check of the running model: tok/s, time to first token, alone and 4 at once), **Autotune** (finds the
   fastest settings for this PC, about 20 minutes, and saves them as a preset the server uses at every start; it
-  stops the running model first, and Cancel leaves your settings unchanged) and **Check for updates / Install
+  stops the running model first; after Cancel it shows whether a preset was saved) and **Check for updates / Install
   update** (engine and control from Strata's signed feed). One tool at a time; Load waits until it ends.
 - **Live status**: an always-visible sidebar row with prefill and decode tok/s, and a screen with a speed graph,
   queue, GPU/RAM use and recent requests.
@@ -62,7 +62,11 @@ All three use the Strata command-line tool of the first Strata install that has 
   only after a test start and keeps the previous one (`strata components rollback`). An update installs into
   Strata's component folder; a run config that starts its own engine file is not changed, and the screen says so.
 
-Cancel sends Ctrl+C (Windows: ends the process tree). The last 20 results are kept in the plugin's folder.
+Cancel sends Ctrl+C (Windows: ends the process tree, so Strata gets no chance to tidy up; it keeps the previous
+engine until a new one passed its test start). Strata installs engine and control separately, so a cancelled update
+can leave one updated: the result shows the versions installed afterwards. A cancelled autotune shows whether a
+preset was saved (from `strata presets list` before and after). Stop on a model being benchmarked cancels the
+benchmark first. The last 20 results are kept in the plugin's folder.
 
 ## How it finds a running server (live status)
 

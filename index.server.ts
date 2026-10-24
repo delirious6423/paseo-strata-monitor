@@ -32,7 +32,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(strataBench, async ({ id }) => (await startBench(id), ok));
   server.handle(strataTune, async ({ id, mode }) => (await startTune(id, mode), ok));
   server.handle(strataUpdateCheck, () => checkUpdate(true));
-  server.handle(strataUpdate, async () => (await startUpdate(), ok));
+  server.handle(strataUpdate, async () => (startUpdate(), ok));
   server.handle(strataCancel, async () => (await cancelJob(), ok));
   return () => {
     unsubscribe();

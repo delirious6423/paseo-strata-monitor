@@ -12,7 +12,7 @@ const ago = (ms: number) => {
   const m = Math.round((Date.now() - ms) / 60_000);
   return m < 1 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} d ago`;
 };
-const mb = (b: number | null) => (b ? `${Math.round(b / 1e6)} MB` : "");
+const mb = (b: number | null) => (b ? `${Math.round(b / 1e6)} MB` : "size unknown");
 
 /** Benchmark, Autotune and Update for the selected model, under the model picker. */
 export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styles; sel: Engine }) {
@@ -37,11 +37,14 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
   const act = useMutation({ mutationFn: (f: () => Promise<unknown>) => f(), onSettled: refresh });
   const checking = useMutation({ mutationFn: () => check({}), onSettled: refresh });
 
-  // A second press confirms the long or disruptive actions; the question goes away after 6 s.
-  const [confirm, setConfirm] = useState<"tune" | "update" | null>(null);
+  // A second press confirms the long or disruptive actions; the question goes away after 6 s, or when another
+  // model is selected (a confirmed Autotune must be for the model it was asked about).
+  const [asked, setConfirm] = useState<string | null>(null);
+  const confirm = asked === `tune:${sel.id}` ? "tune" : asked === "update" ? "update" : null;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ask = (what: "tune" | "update", run: () => void) => {
-    if (confirm === what) {
+  const ask = (kind: "tune" | "update", run: () => void) => {
+    const what = kind === "tune" ? `tune:${sel.id}` : kind;
+    if (asked === what) {
       setConfirm(null);
       run();
       return;
@@ -104,7 +107,7 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
             {u.control.offered && u.control.offered !== u.control.installed ? ` → ${u.control.offered}` : ""}
           </Text>
           <Text style={[styles.label, { fontSize: 12 }]}>
-            {u.available ? `Update available (${mb(u.downloadBytes)} download)` : "Up to date"} · checked {ago(u.checkedMs)}
+            {u.available ? `Update available (download ${mb(u.downloadBytes)})` : "Up to date"} · checked {ago(u.checkedMs)}
           </Text>
           {!u.reachesModels ? (
             <Text style={{ color: c.statusWarning, fontSize: 12 }}>
@@ -125,11 +128,11 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
             {KIND[j.kind]}
             {j.model ? ` · ${j.model}` : ""} · {ago(j.endedMs ?? j.startedMs)}
           </Text>
-          <Text style={{ color: j.state === "failed" ? c.statusDanger : c.foreground, fontSize: 13 }}>
+          <Text numberOfLines={4} style={{ color: j.state === "failed" ? c.statusDanger : c.foreground, fontSize: 13 }}>
             {j.state === "failed" ? `Failed: ${j.error}` : j.outcome}
           </Text>
-          {j.details.map((d) => (
-            <Text key={d} style={[styles.label, { fontSize: 12 }]}>
+          {j.details.map((d, i) => (
+            <Text key={i} style={[styles.label, { fontSize: 12 }]}>
               {d}
             </Text>
           ))}

@@ -182,12 +182,27 @@ job = await waitJob(60);
 check("autotune result", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") && job.details.some((d) => /every start/.test(d)), job);
 await startTune(tinyId, "quick");
 await sleep(2000);
+await checkUpdate(true); // an update check while Autotune runs must not take over its Cancel
+let t0 = Date.now();
 await cancelJob();
 job = await waitJob(40);
-check("autotune cancel ends it, settings unchanged", job?.state === "cancelled" && /not changed/.test(job.outcome ?? "") && (await strataListeners()).length === 0, job);
+check("autotune cancel (after an update check) ends it promptly; nothing saved", job?.state === "cancelled" && /before anything was saved/.test(job.outcome ?? "") &&
+  Date.now() - t0 < 20_000 && (await strataListeners()).length === 0, [job, Date.now() - t0]);
 await startUpdate();
 job = await waitJob(40);
 check("update installs with progress", job?.kind === "update" && job.state === "done" && job.outcome === "Updated" && job.details.length === 2, job);
+await startUpdate();
+await sleep(1500);
+await cancelJob();
+job = await waitJob(40);
+check("update cancel reports what is installed now", job?.state === "cancelled" && /Installed now: engine/.test(job.outcome ?? ""), job);
+await loadEngine(tinyId);
+await until(tinyId, "ready", 30);
+await startBench(tinyId);
+await sleep(500);
+await stopEngine(tinyId); // Stop on the benchmarked model ends the benchmark first
+job = await waitJob(20);
+check("Stop during a benchmark cancels it, then stops the model", job?.kind === "bench" && job.state === "cancelled" && (await until(tinyId, "stopped", 30)), [job, await state(tinyId)]);
 
 decoy.close();
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILED`);

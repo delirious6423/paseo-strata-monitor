@@ -2,15 +2,17 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import type { Job, UpdateCheck } from "../shared/tools";
-import { cmdExeLine, discovery, findModel, freeGpu, listEngines, setBusy, strataCommand } from "./control";
+import { type Job, type UpdateCheck, jobSchema } from "../shared/tools";
+import { cmdExeLine, discovery, findModel, freeGpu, reserveReady, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
+import type { Found } from "./discover";
 import { installPlaces } from "./discover";
 import { type Os, cliIn, componentsDir, here, pluginStateDir } from "./places";
 
 // Strata's maintenance tools through its own command-line tool, one at a time (each needs the GPU or the
 // engine files): `bench run` against the running model, `tune auto` on a model's run config (saves a preset
 // the server applies at every start), and `update` from the signed feed. Progress comes from the files and
-// JSON lines Strata writes for its own desktop app; Cancel interrupts the CLI the way Ctrl+C would.
+// JSON lines Strata writes for its own desktop app. Cancel interrupts the CLI the way Ctrl+C would (Windows:
+// ends its process tree); what changed anyway is read back from Strata afterwards, never assumed.
 
 const HISTORY = 20;
 const CHECK_TTL_MS = 60 * 60_000;
@@ -18,11 +20,13 @@ const CHECK_TTL_MS = 60 * 60_000;
 let os: Os = here();
 export const configureTools = (o: Os) => void (os = o);
 
-let current: Job | null = null;
+/** The job in progress, with its own process and cancel request. */
+type Run = { job: Job; cancel: boolean; proc: ChildProcess | null };
+let run: Run | null = null;
 let history: Job[] | null = null;
-let child: ChildProcess | null = null;
+const checks = new Set<ChildProcess>(); // update checks in flight (they are not jobs)
+let disposed = false;
 let lastCheck: UpdateCheck | null = null;
-let cancelRequested = false;
 
 const state = () => pluginStateDir(os);
 const historyFile = () => join(state(), "jobs.json");
@@ -31,7 +35,8 @@ async function loadHistory(): Promise<Job[]> {
   if (history) return history;
   try {
     const v = JSON.parse(await readFile(historyFile(), "utf8"));
-    history = Array.isArray(v) ? v.slice(0, HISTORY) : [];
+    // A hand-edited or truncated entry is dropped, not allowed to blank the Tools section.
+    history = (Array.isArray(v) ? v : []).flatMap((j) => (jobSchema.safeParse(j).success ? [j] : [])).slice(0, HISTORY);
   } catch {
     history = [];
   }
@@ -44,24 +49,28 @@ async function saveHistory() {
 }
 
 export async function toolsStatus() {
-  return { job: current, history: await loadHistory(), update: lastCheck };
+  return { job: run?.job ?? null, history: await loadHistory(), update: lastCheck };
 }
 
-/** The install whose CLI runs the tools: the first Strata install that has one, else Strata on PATH. */
-async function toolInstall(): Promise<string> {
+/** The CLI for a model: its own install when it has one, else the first Strata install with a CLI (else PATH). */
+async function installFor(f?: Found): Promise<string> {
+  if (f?.launcher.kind === "strata" && existsSync(cliIn(f.launcher.install, os))) return f.launcher.install;
   const places = await installPlaces(os);
   return places.find((p) => existsSync(cliIn(p.path, os)))?.path ?? places[0]?.path ?? os.home;
 }
 
-/** Start Strata's CLI; every stdout line goes to `onLine`. Resolves with the exit code and the last lines. */
-async function launch(args: string[], onLine: (line: string) => void): Promise<{ code: number | null; lines: string[]; err: string }> {
-  if (cancelRequested) return { code: 130, lines: [], err: "" }; // cancelled while the tool was still preparing
-  const { cmd, env } = strataCommand(await toolInstall());
+type Ctx = { stop: () => boolean; started: (p: ChildProcess) => void; done?: (p: ChildProcess) => void };
+type Exit = { code: number | null; lines: string[]; err: string };
+
+/** Start Strata's CLI unless the run was cancelled meanwhile (checked right before spawning). */
+async function launch(install: string, args: string[], ctx: Ctx, onLine: (line: string) => void = () => {}): Promise<Exit> {
+  const { cmd, env } = strataCommand(install);
+  if (ctx.stop() || disposed) return { code: 130, lines: [], err: "" };
   const opts = { env: { ...process.env, ...env }, windowsHide: true, detached: !os.windows };
   const p = os.windows && /\.(cmd|bat)$/i.test(cmd)
     ? spawn("cmd.exe", ["/d", "/s", "/c", cmdExeLine(cmd, args)], { ...opts, windowsVerbatimArguments: true })
     : spawn(cmd, args, opts);
-  child = p;
+  ctx.started(p);
   const lines: string[] = [];
   let err = "";
   let buf = "";
@@ -77,12 +86,12 @@ async function launch(args: string[], onLine: (line: string) => void): Promise<{
     }
   });
   p.stderr?.setEncoding("utf8").on("data", (d: string) => (err = (err + d).slice(-2000)));
-  return new Promise((done) => {
-    p.on("error", (e) => done({ code: -1, lines, err: String(e.message) }));
+  return new Promise((finish) => {
+    p.on("error", (e) => finish({ code: -1, lines, err: String(e.message) }));
     p.on("close", (code) => {
       if (buf.trim()) lines.push(buf.trim());
-      child = null;
-      done({ code, lines, err });
+      ctx.done?.(p);
+      finish({ code, lines, err });
     });
   });
 }
@@ -96,68 +105,84 @@ const lastJson = (lines: string[]): Record<string, any> | null => {
   }
   return null;
 };
+const why = (r: Exit, res: Record<string, any> | null) =>
+  String(res?.error?.message ?? res?.result?.message ?? (r.err.trim().split("\n").pop() || `exit ${r.code}`)).slice(0, 300);
 
-/** Ctrl+C for the CLI and everything it started (engines under test); Windows has no SIGINT, so end the tree. */
-export async function cancelJob(): Promise<void> {
-  const p = child;
-  if (!current || current.state !== "running") throw new Error("Nothing is running");
-  cancelRequested = true;
-  current.message = "Cancelling…";
-  if (!p?.pid) return; // still preparing (e.g. stopping the model): the CLI will not be started
+/** Ctrl+C for the CLI and what it started (engines under test). Windows has no Ctrl+C for another process
+ * tree: it is ended outright (Strata keeps the previous engine until a new one passed its test start). */
+function interrupt(p: ChildProcess, onError: (msg: string) => void) {
+  if (!p.pid) return;
   if (os.windows) {
-    execFile("taskkill", ["/pid", String(p.pid), "/T", "/F"], () => {});
+    execFile("taskkill", ["/pid", String(p.pid), "/T", "/F"], (e, _o, stderr) => {
+      if (e && p.exitCode === null) onError(String(stderr || e.message).trim().slice(0, 200));
+    });
     return;
   }
   try {
     process.kill(-p.pid, "SIGINT");
   } catch {}
   setTimeout(() => {
-    if (child === p) try { process.kill(-p.pid!, "SIGKILL"); } catch {}
+    if (p.exitCode === null && p.signalCode === null) try { process.kill(-p.pid!, "SIGKILL"); } catch {}
   }, 30_000).unref();
 }
 
-/** Stop the running tool when the plugin unloads, so nothing keeps the GPU without a screen to show it. */
-export function disposeTools() {
-  if (child?.pid) void cancelJob().catch(() => {});
+export async function cancelJob(): Promise<void> {
+  const r = run;
+  if (!r || r.job.state !== "running") throw new Error("Nothing is running");
+  r.cancel = true;
+  r.job.message = "Cancelling…";
+  if (r.proc) interrupt(r.proc, (msg) => (r.job.message = `Cancel failed: ${msg}`));
+  // else: still preparing; the CLI will not be started
 }
 
-type Runner = (job: Job, poll: (fn: () => Promise<void>) => void) => Promise<void>;
+/** Plugin unload: cancel the job (preparing or running) and any update check, so nothing keeps the GPU. */
+export function disposeTools() {
+  disposed = true;
+  if (run) {
+    run.cancel = true;
+    if (run.proc) interrupt(run.proc, () => {});
+  }
+  for (const p of checks) interrupt(p, () => {});
+}
 
-async function startJob(kind: Job["kind"], modelId: string | null, model: string | null, busyAs: string | null, run: Runner) {
-  if (current?.state === "running") throw new Error(`${current.kind === "bench" ? "A benchmark" : current.kind === "tune" ? "Autotune" : "An update"} is already running`);
+const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update" } as const;
+
+/** Run one job; `reserved`: the caller already marked the tools busy (benchmark, under the Load/Stop lock). */
+function startJob(kind: Job["kind"], f: Found | null, body: (r: Run, poll: (fn: () => Promise<void>) => void) => Promise<void>, reserved = false) {
   const job: Job = {
-    id: `${Date.now().toString(36)}`, kind, modelId, model, startedMs: Date.now(), endedMs: null, state: "running",
-    pct: null, message: "Starting…", minutesLeft: null, outcome: null, details: [], error: null,
+    id: Date.now().toString(36), kind, modelId: f?.id ?? null, model: f ? `${f.provider} ${f.quant}` : null,
+    startedMs: Date.now(), endedMs: null, state: "running", pct: null, message: "Starting…", minutesLeft: null,
+    outcome: null, details: [], error: null,
   };
-  current = job;
-  cancelRequested = false;
-  if (busyAs) setBusy(busyAs);
+  const r: Run = { job, cancel: false, proc: null };
+  run = r;
+  if (!reserved) setBusy(busyName[kind]);
   let timer: NodeJS.Timeout | null = null;
-  const poll = (fn: () => Promise<void>) => {
-    timer = setInterval(() => void fn().catch(() => {}), 1000);
-  };
+  const poll = (fn: () => Promise<void>) => void (timer = setInterval(() => void fn().catch(() => {}), 1000));
   void (async () => {
     try {
-      await run(job, poll);
+      await body(r, poll);
     } catch (e) {
       job.state = "failed";
-      job.error = String((e as Error).message ?? e).slice(0, 500);
+      job.error = String((e as Error).message ?? e).slice(0, 300);
     } finally {
       if (timer) clearInterval(timer);
       if (job.state === "running") job.state = "done";
       job.endedMs = Date.now();
       job.minutesLeft = null;
-      if (busyAs) setBusy(null);
+      setBusy(null);
       const h = await loadHistory();
-      h.unshift(job);
-      history = h.slice(0, HISTORY);
-      if (current === job) current = null;
+      history = [job, ...h].slice(0, HISTORY);
+      if (run === r) run = null;
       await saveHistory().catch(() => {});
     }
   })();
 }
 
-const label = (f: { provider: string; quant: string }) => `${f.provider} ${f.quant}`;
+const ensureIdle = () => {
+  if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
+};
+const jobCtx = (r: Run): Ctx => ({ stop: () => r.cancel, started: (p) => (r.proc = p), done: () => (r.proc = null) });
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 const n = (v: unknown, digits = 1) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "–");
 
@@ -174,81 +199,114 @@ export function benchLines(summary: Record<string, any>): string[] {
       (p.failed ? `, ${p.failed} failed` : ""));
 }
 
+// Stop on the benchmarked model cancels the benchmark first (it would only fail half-way).
+setBeforeStop(async (id) => {
+  const r = run;
+  if (!r || r.job.kind !== "bench" || r.job.modelId !== id) return;
+  await cancelJob().catch(() => {});
+  for (let i = 0; i < 100 && run === r; i++) await new Promise((ok) => setTimeout(ok, 100));
+});
+
 export async function startBench(id: string) {
-  const f = await findModel(id);
-  const e = (await listEngines()).engines.find((x) => x.id === id);
-  if (e?.state !== "ready") throw new Error("Load this model first: the benchmark measures the running server");
-  const host = f.host && !/^(0\.0\.0\.0|::|\[::\]|localhost)$/.test(f.host) ? f.host : "127.0.0.1";
+  ensureIdle();
+  const f = await reserveReady(id, busyName.bench); // under the Load/Stop lock: no switch underneath
+  try {
+    ensureIdle();
+  } catch (e) {
+    setBusy(null);
+    throw e;
+  }
   const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
-  await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
-  await startJob("bench", id, label(f), "A benchmark", async (job, poll) => {
+  startJob("bench", f, async (r, poll) => {
+    const job = r.job;
+    await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
     job.message = "Warming up";
     poll(async () => {
       const p = JSON.parse(await readFile(join(out, "progress.json"), "utf8"));
       const planned = Array.isArray(p.planned_phases) ? p.planned_phases.length : 0;
       if (planned) job.pct = Math.round((100 * (p.completed_phases ?? 0)) / planned);
-      if (p.current_phase && !cancelRequested) job.message = `Measuring: ${p.current_phase}`;
+      if (p.current_phase && !r.cancel) job.message = `Measuring: ${p.current_phase}`;
     });
-    const r = await launch(["bench", "run", "--url", `http://${host}:${f.port}`, "--suite", "serving-smoke",
-      "--condition", "paseo", "--out", out, "--output", "json"], () => {});
-    const res = lastJson(r.lines);
-    if (cancelRequested) {
+    const x = await launch(await installFor(f), ["bench", "run", "--url", serverUrl(f), "--suite", "serving-smoke",
+      "--condition", "paseo", "--out", out, "--output", "json"], jobCtx(r));
+    const res = lastJson(x.lines);
+    if (r.cancel) {
       job.state = "cancelled";
       job.outcome = "Cancelled";
       return;
     }
-    if (!res?.summary) throw new Error(res?.error?.message ?? (r.err.trim().split("\n").pop() || `exit ${r.code}`));
+    if (!res?.summary) throw new Error(why(x, res));
     job.pct = 100;
     job.details = benchLines(res.summary);
     job.outcome = res.ok ? "Finished" : "Finished with failed requests";
     if (typeof res.path === "string") job.details.push(`Report: ${res.path}`);
-  });
+  }, true);
 }
 
 // ------------------------------------------------------------------------------------------- autotune
 
-const TUNE_OUTCOME: Record<string, string> = {
-  improved: "Faster settings found and saved",
-  default_confirmed: "Your current settings are already the fastest",
-  cancelled: "Cancelled: your settings were not changed",
-};
+/** Saved presets (id -> name), or null if Strata could not list them. Read before and after a tune: what a
+ * tune saved is what appeared, whatever its output said or failed to say. */
+async function presetNames(install: string): Promise<Map<string, string> | null> {
+  const x = await launch(install, ["presets", "list", "--output", "json"], { stop: () => disposed, started: () => {} }).catch(() => null);
+  const res = x && lastJson(x.lines);
+  if (!res?.ok || !Array.isArray(res.presets)) return null;
+  return new Map(res.presets.flatMap((p: any) => (typeof p?.id === "string" ? [[p.id, String(p.name ?? p.id)]] : [])));
+}
 
-/** Strata's `tune auto` result -> headline and detail lines. */
-export function tuneResult(result: Record<string, any> | null, code: number | null): { outcome: string; details: string[]; cancelled: boolean } {
-  const outcome = String(result?.outcome ?? (code === 130 ? "cancelled" : "failed"));
-  const details: string[] = [];
-  if (typeof result?.message === "string") details.push(result.message);
-  if (result?.preset?.name) {
-    details.push(outcome === "improved"
-      ? `Saved as preset "${result.preset.name}"; the server uses it at every start of this model`
-      : `Recorded as preset "${result.preset.name}": the standard settings, so nothing changes at start`);
+/** A finished, cancelled or failed tune -> job state and wording, from Strata's result and the preset list. */
+export function tuneReport(result: Record<string, any> | null, code: number | null, cancelled: boolean, saved: string[] | null):
+    { state: Job["state"]; outcome: string | null; details: string[]; error: string | null } {
+  const outcome = String(result?.outcome ?? "");
+  const details: string[] = typeof result?.message === "string" ? [result.message] : [];
+  const savedLine = saved?.length
+    ? outcome === "default_confirmed"
+      ? `Recorded as preset "${saved[0]}": the standard settings, so nothing changes at start`
+      : `Saved as preset "${saved[0]}"; the server uses it at every start of this model`
+    : null;
+  if (savedLine) details.push(savedLine);
+  if (cancelled || outcome === "cancelled" || code === 130) {
+    const what = saved === null ? "Cancelled; whether a preset was saved could not be checked (strata presets list)"
+      : saved.length ? `Cancelled after preset "${saved[0]}" was saved` : "Cancelled before anything was saved";
+    return { state: "cancelled", outcome: what, details, error: null };
   }
-  return { outcome: TUNE_OUTCOME[outcome] ?? "No change was saved", details, cancelled: outcome === "cancelled" };
+  if (code === 0 && outcome === "improved") {
+    return { state: "done", outcome: saved?.length ? "Faster settings found and saved" : saved === null
+      ? "Faster settings found (could not confirm the preset was saved)" : "Faster settings found, but no preset was saved", details, error: null };
+  }
+  if (code === 0 && outcome === "default_confirmed") return { state: "done", outcome: "Your current settings are already the fastest", details, error: null };
+  return { state: "failed", outcome: null, details, error: String(result?.message ?? `autotune ended with exit ${code}`).slice(0, 300) };
 }
 
 export async function startTune(id: string, mode: "quick" | "thorough") {
+  ensureIdle();
   const f = await findModel(id);
   const status = join(state(), "tune-status.json");
-  await mkdir(state(), { recursive: true, mode: 0o700 });
-  await rm(status, { force: true });
-  await startJob("tune", id, label(f), "Autotune", async (job, poll) => {
+  startJob("tune", f, async (r, poll) => {
+    const job = r.job;
+    const install = await installFor(f);
+    await mkdir(state(), { recursive: true, mode: 0o700 });
+    await rm(status, { force: true });
+    const before = await presetNames(install);
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
     job.message = "Stopping the running model";
-    await freeGpu();
+    await freeGpu(() => r.cancel);
     job.message = "Measuring your current settings";
     poll(async () => {
       const st = JSON.parse(await readFile(status, "utf8"));
       if (st.runs_planned) job.pct = Math.min(99, Math.round((100 * (st.runs_done ?? 0)) / st.runs_planned));
-      if (typeof st.message === "string" && !cancelRequested) job.message = st.message;
+      if (typeof st.message === "string" && !r.cancel) job.message = st.message;
       job.minutesLeft = typeof st.minutes_left === "number" ? st.minutes_left : null;
     });
-    const r = await launch(["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], () => {});
-    const res = lastJson(r.lines);
-    if (!res?.result && r.code !== 130 && !cancelRequested) throw new Error(res?.error?.message ?? (r.err.trim().split("\n").pop() || `exit ${r.code}`));
-    const t = tuneResult(res?.result ?? null, cancelRequested && !res?.result ? 130 : r.code);
-    job.outcome = t.outcome;
-    job.details = t.details;
-    job.pct = 100;
-    if (t.cancelled) job.state = "cancelled";
+    const x = await launch(install, ["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], jobCtx(r));
+    const after = await presetNames(install);
+    const result = lastJson(x.lines)?.result ?? null;
+    // Strata names the preset it saved; when its output is missing (cancelled late), compare the lists.
+    const named = typeof result?.preset?.name === "string" ? [result.preset.name] : null;
+    const saved = named ?? (before && after ? [...after].filter(([k]) => !before.has(k)).map(([, v]) => v) : null);
+    const rep = tuneReport(result, x.code, r.cancel, saved);
+    Object.assign(job, rep, { pct: rep.state === "done" ? 100 : job.pct });
+    if (rep.state === "failed" && !rep.error) job.error = why(x, lastJson(x.lines));
   });
 }
 
@@ -275,10 +333,16 @@ export function readCheck(report: Record<string, any>, engines: string[], compon
 
 export async function checkUpdate(force = false): Promise<UpdateCheck> {
   if (!force && lastCheck && Date.now() - lastCheck.checkedMs < CHECK_TTL_MS) return lastCheck;
-  if (current?.kind === "update" && current.state === "running") throw new Error("An update is running");
-  const r = await launch(["update", "--check", "--output", "json"], () => {});
-  const res = lastJson(r.lines);
-  if (!res?.ok) throw new Error(res?.error?.message ?? (r.err.trim().split("\n").pop() || `update check failed (exit ${r.code})`));
+  if (run?.job.kind === "update") throw new Error("An update is running");
+  return readInstalled();
+}
+
+/** `strata update --check` now (also how a cancelled update finds out what it left installed). */
+async function readInstalled(): Promise<UpdateCheck> {
+  const x = await launch(await installFor(), ["update", "--check", "--output", "json"],
+    { stop: () => disposed, started: (p) => checks.add(p), done: (p) => checks.delete(p) });
+  const res = lastJson(x.lines);
+  if (!res?.ok) throw new Error(why(x, res));
   const engines = (await discovery()).models.map((m) => m.engine);
   lastCheck = readCheck(res, engines, componentsDir(os));
   return lastCheck;
@@ -286,7 +350,6 @@ export async function checkUpdate(force = false): Promise<UpdateCheck> {
 
 /** One `strata update --output jsonl` event -> progress on the job. */
 export function updateEvent(job: Job, ev: Record<string, any>) {
-  if (cancelRequested) return;
   if (ev.event === "progress" && typeof ev.percent === "number") {
     job.pct = ev.percent;
     job.message = `Downloading ${ev.label ?? ev.component ?? ""}`.trim();
@@ -295,25 +358,37 @@ export function updateEvent(job: Job, ev: Record<string, any>) {
   }
 }
 
-export async function startUpdate() {
-  await startJob("update", null, null, "An update", async (job) => {
+export function startUpdate() {
+  ensureIdle();
+  startJob("update", null, async (r) => {
+    const job = r.job;
+    const install = await installFor();
+    if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });
     job.message = "Stopping the running model";
-    await freeGpu();
-    const r = await launch(["update", "--output", "jsonl", "--wait", "0"], (line) => {
+    await freeGpu(() => r.cancel);
+    const x = await launch(install, ["update", "--output", "jsonl", "--wait", "0"], jobCtx(r), (line) => {
       try {
-        updateEvent(job, JSON.parse(line));
+        if (!r.cancel) updateEvent(job, JSON.parse(line));
       } catch {}
     });
-    const res = lastJson(r.lines);
-    if (cancelRequested && r.code !== 0) {
+    const res = lastJson(x.lines);
+    lastCheck = null;
+    const results = Array.isArray(res?.results) ? res.results : null;
+    if (results) job.details = results.map((c: any) => `${c.component}: ${c.status}${c.version ? ` ${c.version}` : ""}${c.error ? ` (${String(c.error).slice(0, 120)})` : ""}`);
+    if (r.cancel) {
+      // Engine and control install separately and one is not undone if the other stops: say what is installed now.
       job.state = "cancelled";
-      job.outcome = "Cancelled: the installed engine was kept";
+      try {
+        const now = await readInstalled();
+        job.outcome = `Cancelled. Installed now: engine ${now.engine.installed ?? "none"}, control ${now.control.installed ?? "none"}`;
+      } catch {
+        job.outcome = "Cancelled; the installed versions could not be checked (strata update --check)";
+      }
       return;
     }
-    if (!res || !Array.isArray(res.results)) throw new Error(res?.error?.message ?? (r.err.trim().split("\n").pop() || `exit ${r.code}`));
-    job.details = res.results.map((x: any) => `${x.component}: ${x.status}${x.version ? ` ${x.version}` : ""}${x.message ? ` (${x.message})` : ""}`);
-    job.outcome = res.ok ? "Updated" : "Update finished with problems";
+    if (!results) throw new Error(why(x, res));
     job.pct = 100;
-    lastCheck = null;
+    if (res!.ok) job.outcome = "Updated";
+    else Object.assign(job, { state: "failed", error: "Some parts did not update; see below (each part is kept or replaced on its own)" });
   });
 }

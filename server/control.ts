@@ -151,10 +151,12 @@ async function ensureProfile(f: Found & { launcher: { kind: "strata" } }): Promi
 const stopping = new Set<string>();
 
 /** Ready = a Strata server on that port says its engine is loaded (not merely: something answers HTTP). */
-const answers = async (f: Found) => {
+/** The model's server root: its configured host unless that is a wildcard, IPv6 in brackets. */
+export const serverUrl = (f: Found) => {
   const h = f.host && !/^(0\.0\.0\.0|::|\[::\]|localhost)$/.test(f.host) ? f.host : "127.0.0.1";
-  return (await strataHealth(`http://${h.includes(":") && !h.startsWith("[") ? `[${h}]` : h}:${f.port}`, PROBE_MS))?.loaded === true;
+  return `http://${h.includes(":") && !h.startsWith("[") ? `[${h}]` : h}:${f.port}`;
 };
+const answers = async (f: Found) => (await strataHealth(serverUrl(f), PROBE_MS))?.loaded === true;
 
 const launcherLabel = (f: Found) => (f.launcher.kind === "systemd" ? `systemd ${f.launcher.unit}` : `Strata runtime (${profileName(f)})`);
 
@@ -251,8 +253,9 @@ export const setBusy = (reason: string | null) => void (busy = reason);
 
 /** Stop every model that holds the GPU, through the same lock as Load/Stop; refuses if a foreign Strata server
  * runs (it would hold the GPU too). For tools that need the whole GPU. */
-export function freeGpu(): Promise<void> {
+export function freeGpu(aborted: () => boolean = () => false): Promise<void> {
   return exclusive(async () => {
+    if (aborted()) return;
     const { engines } = await listNow(false);
     const foreign = await elsewhere(engines, true);
     if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first`);
@@ -265,6 +268,19 @@ export function freeGpu(): Promise<void> {
 
 export { find as findModel };
 
+/** Ready-and-reserved: under the Load/Stop lock, the model is ready and the tool is marked busy before any
+ * queued Load can run (a benchmark must not have its model switched underneath). */
+export function reserveReady(id: string, reason: string): Promise<Found> {
+  return exclusive(async () => {
+    if (busy) throw new Error(`${busy} is running; cancel it or wait for it to finish`);
+    const f = await find(id);
+    const e = (await listNow(false)).engines.find((x) => x.id === id);
+    if (e?.state !== "ready") throw new Error("Load this model first: the benchmark measures the running server");
+    busy = reason;
+    return f;
+  });
+}
+
 /** Strata's command-line tool for an install, with the environment it needs (a source checkout's .venv). */
 export const strataCommand = (install: string) => ({ cmd: cli(install), env: cliEnv(install) });
 
@@ -276,6 +292,7 @@ export function loadEngine(id: string): Promise<void> {
 }
 
 async function load(id: string, aborted: () => boolean): Promise<void> {
+  if (busy) throw new Error(`${busy} is running; cancel it or wait for it to finish`); // admitted before it began
   const f = await find(id);
   const { engines } = await listNow(false); // fresh, not the shared cache
   const active = engines.filter(owns);
@@ -298,7 +315,12 @@ async function load(id: string, aborted: () => boolean): Promise<void> {
   expectServer(f.port);
 }
 
+/** Called before a Stop: a tool working on that model (a benchmark) is cancelled first. */
+let beforeStop: (id: string) => Promise<void> = async () => {};
+export const setBeforeStop = (fn: (id: string) => Promise<void>) => void (beforeStop = fn);
+
 export async function stopEngine(id: string): Promise<void> {
+  await beforeStop(id);
   generation.set(id, gen(id) + 1); // every Load requested before now will not start this model
   stopErrors.delete(id);
   const f = await find(id);

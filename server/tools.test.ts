@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Job } from "../shared/tools.ts";
-import { benchLines, readCheck, tuneResult, updateEvent } from "./tools.ts";
+import { serverUrl } from "./control.ts";
+import { benchLines, readCheck, tuneReport, updateEvent } from "./tools.ts";
 
 test("benchmark summary: one line per measured phase, warmup left out", () => {
   const lines = benchLines({ phases: [
@@ -17,15 +18,34 @@ test("benchmark summary: one line per measured phase, warmup left out", () => {
   assert.deepEqual(benchLines({ phases: [{ kind: "serial", output_tok_s: "x" }] }), ["One request: – tok/s, first token – s, answer – s"]);
 });
 
-test("autotune result: headline per outcome; a preset of standard settings is not called a change", () => {
-  const improved = tuneResult({ outcome: "improved", message: "12% faster", preset: { name: "fast" } }, 0);
+test("autotune report: state and wording from Strata's result, exit code and the presets that appeared", () => {
+  const improved = tuneReport({ outcome: "improved", message: "12% faster" }, 0, false, ["fast"]);
+  assert.equal(improved.state, "done");
   assert.equal(improved.outcome, "Faster settings found and saved");
   assert.match(improved.details[1]!, /uses it at every start/);
-  const same = tuneResult({ outcome: "default_confirmed", message: "Nothing was changed.", preset: { name: "std" } }, 0);
+  const same = tuneReport({ outcome: "default_confirmed", message: "Nothing was changed." }, 0, false, ["std"]);
   assert.equal(same.outcome, "Your current settings are already the fastest");
   assert.match(same.details[1]!, /nothing changes at start/);
-  assert.deepEqual(tuneResult(null, 130), { outcome: "Cancelled: your settings were not changed", details: [], cancelled: true });
-  assert.equal(tuneResult({ outcome: "weird" }, 6).outcome, "No change was saved");
+  // Strata can find faster settings and fail to save them (PresetError): never claim "saved".
+  assert.equal(tuneReport({ outcome: "improved" }, 0, false, []).outcome, "Faster settings found, but no preset was saved");
+  assert.match(tuneReport({ outcome: "improved" }, 0, false, null).outcome!, /could not confirm/);
+  // A tune that failed (exit 6, e.g. the engine would not start) is a failure, not "done".
+  const failed = tuneReport({ outcome: "failed", message: "engine did not start" }, 6, false, []);
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.error, "engine did not start");
+  assert.equal(tuneReport(null, 1, false, []).state, "failed");
+  // Cancel says what is known, not that nothing changed: a preset saved just before the interrupt is reported.
+  assert.equal(tuneReport(null, 130, true, []).outcome, "Cancelled before anything was saved");
+  assert.match(tuneReport(null, 130, true, ["late"]).outcome!, /after preset "late" was saved/);
+  assert.match(tuneReport(null, null, true, null).outcome!, /could not be checked/);
+});
+
+test("benchmark URL: IPv6 hosts in brackets, wildcard hosts as loopback", () => {
+  const f = (host: string | null) => serverUrl({ host, port: 8080 } as never);
+  assert.equal(f("::1"), "http://[::1]:8080");
+  assert.equal(f("0.0.0.0"), "http://127.0.0.1:8080");
+  assert.equal(f(null), "http://127.0.0.1:8080");
+  assert.equal(f("10.0.0.5"), "http://10.0.0.5:8080");
 });
 
 test("update check: versions, download size, and whether the found models would get the new engine", () => {
@@ -80,6 +100,65 @@ test("Cancel while a tool is still preparing: the CLI never starts and the job e
     assert.equal(job?.state, "cancelled", JSON.stringify(job));
     assert.equal(job?.error, null);
   } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("jobs own their process: an update check during Autotune does not take over Cancel, and a check after a cancel works", async () => {
+  const { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join, resolve } = await import("node:path");
+  const { configure } = await import("./control.ts");
+  const { cancelJob, checkUpdate, configureTools, startTune, startUpdate, toolsStatus } = await import("./tools.ts");
+  if (process.platform === "win32") return; // the fake CLI is a sh wrapper here; Windows runs it in the VM tests
+  const home = mkdtempSync(join(tmpdir(), "strata-tools-"));
+  // A Strata install whose CLI is the fake one, with one model (empty GGUF header) it can tune.
+  const inst = join(home, "Strata");
+  mkdirSync(join(inst, "bin"), { recursive: true });
+  writeFileSync(join(inst, "bin", "strata"), `#!/bin/sh\nexec node ${resolve("tests/vm/fake-strata/bin/strata.mjs")} "$@"\n`);
+  chmodSync(join(inst, "bin", "strata"), 0o755);
+  const header = Buffer.alloc(24);
+  header.write("GGUF");
+  header.writeUInt32LE(3, 4);
+  writeFileSync(join(inst, "tiny-Q4_K_M.gguf"), header);
+  writeFileSync(join(inst, "strata-tiny.json"), JSON.stringify({ exe: join(inst, "engine"), args: ["--native", join(inst, "tiny-Q4_K_M.gguf")], model_name: "tiny", port: 8099 }));
+  mkdirSync(join(home, ".config", "strata"), { recursive: true });
+  writeFileSync(join(home, ".config", "strata", "settings.json"), JSON.stringify({ installs: [inst] }));
+  const o = { windows: false, home, env: { HOME: home, PATH: "" } };
+  const oldHome = process.env.HOME;
+  process.env.HOME = home; // the fake CLI keeps its presets in HOME
+  configure({ extraFolders: [], useSystemd: false }, o);
+  configureTools(o);
+  const { discovery } = await import("./control.ts");
+  const id = (await discovery()).models[0]?.id;
+  assert.ok(id, "the fixture model is found");
+  const ended = async () => {
+    for (let i = 0; i < 200; i++) {
+      const s = await toolsStatus();
+      if (!s.job) return s.history[0];
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error("the job did not end");
+  };
+  try {
+    await startTune(id!, "quick"); // the fake tune takes about 5 s
+    for (let i = 0; i < 100 && !/Round/.test((await toolsStatus()).job?.message ?? ""); i++) await new Promise((r) => setTimeout(r, 100));
+    await checkUpdate(true); // a check that starts and ends while Autotune runs
+    const t0 = Date.now();
+    await cancelJob();
+    const job = await ended();
+    assert.equal(job?.state, "cancelled", JSON.stringify(job));
+    assert.ok(Date.now() - t0 < 4000, "Cancel interrupted the tune itself, not the finished check");
+    assert.equal((await checkUpdate(true)).engine.offered, "9.9.9"); // no leftover cancel from the last job
+    // A cancelled update says what is installed now (engine and control are not one transaction).
+    await startUpdate();
+    for (let i = 0; i < 100 && !/Downloading/.test((await toolsStatus()).job?.message ?? ""); i++) await new Promise((r) => setTimeout(r, 100));
+    await cancelJob();
+    const upd = await ended();
+    assert.equal(upd?.state, "cancelled");
+    assert.match(upd?.outcome ?? "", /Installed now: engine/);
+  } finally {
+    process.env.HOME = oldHome;
     rmSync(home, { recursive: true, force: true });
   }
 });

@@ -65,6 +65,9 @@ if (a[0] === "runtime") {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let interrupted = false;
 process.on("SIGINT", () => (interrupted = true));
+const PRESETS = join(homedir(), ".fake-strata-presets.json");
+const presets = () => (existsSync(PRESETS) ? JSON.parse(readFileSync(PRESETS, "utf8")) : []);
+if (a[0] === "presets" && a[1] === "list") out({ ok: true, presets: presets() });
 if (a[0] === "bench" && a[1] === "run") {
   const dir = arg("--out");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -97,7 +100,9 @@ if (a[0] === "tune" && a[1] === "auto") {
       out({ ok: true, result }, 130);
     }
   }
-  const result = { outcome: "improved", message: "8% faster than your settings.", preset: { id: "p1", name: "fake 64K – Full speed" } };
+  const preset = { id: `p${Date.now()}`, name: `fake 64K – Full speed ${presets().length + 1}`, active: true };
+  writeFileSync(PRESETS, JSON.stringify([...presets(), preset]));
+  const result = { outcome: "improved", message: "8% faster than your settings.", preset: { id: preset.id, name: preset.name } };
   writeFileSync(status, JSON.stringify({ state: "done", result }));
   out({ ok: true, result });
 }
@@ -109,6 +114,7 @@ if (a[0] === "update") {
   for (let pct = 0; pct <= 100; pct += 25) {
     process.stdout.write(JSON.stringify({ schema_version: 1, event: "progress", phase: "download", component: "engine", label: "engine 9.9.9", percent: pct, done: pct, total: 100 }) + "\n");
     await sleep(400);
+    if (interrupted) out({ ok: false, exit_code: 130, results: [{ component: "engine", status: "cancelled" }] }, 130);
   }
   process.stdout.write(JSON.stringify({ schema_version: 1, event: "phase", phase: "test", message: "Test start of the new engine" }) + "\n");
   await sleep(400);
