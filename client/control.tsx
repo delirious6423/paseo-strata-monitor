@@ -5,17 +5,20 @@ import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { type Engine, strataEngines, strataLoad, strataStop } from "../shared/control";
 import { gb, groupEngines } from "../shared/group";
+import type { Styles } from "./monitor";
+import { useStrata } from "./snapshot";
 
 const BUSY_MS = 1000;
 const IDLE_MS = 3000;
 const busy = (e: Engine) => e.state === "loading" || e.state === "stopping";
 
-export function useEngines() {
+/** `idleMs`: the screen polls every 3 s; the sidebar row only needs to notice a load starting, so slower. */
+export function useEngines(idleMs = IDLE_MS) {
   const engines = useRpc(strataEngines);
   return useQuery({
     queryKey: ["strata-engines"],
     queryFn: () => engines({}),
-    refetchInterval: (query) => (query.state.data?.engines.some(busy) ? BUSY_MS : IDLE_MS),
+    refetchInterval: (query) => (query.state.data?.engines.some(busy) ? BUSY_MS : idleMs),
     refetchIntervalInBackground: false,
     staleTime: 0,
   });
@@ -37,11 +40,12 @@ function status(e: Engine): string {
   }
 }
 
-export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; styles: any; openSettings?: () => void }) {
+export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; styles: Styles; openSettings?: () => void }) {
   const c = theme.colors;
   const { data, error } = useEngines();
+  const { data: snapshot } = useStrata();
   const client = useQueryClient();
-  const engines = useRpc(strataEngines);
+  const engines = useRpc(strataEngines); // the same RPC as useEngines, called with rescan
   const load = useRpc(strataLoad);
   const stop = useRpc(strataStop);
   const [picked, setPicked] = useState<string | null>(null);
@@ -101,6 +105,12 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
   }
 
   const running = data.engines.find((e) => e.state !== "stopped" && e.state !== "failed");
+  // A Strata server on this machine that no listed model accounts for (started elsewhere): Load would be refused.
+  const ours = new Set(data.engines.filter((e) => e.state !== "stopped").map((e) => e.port));
+  const elsewhere = (snapshot?.servers ?? []).filter((s) => {
+    const m = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)$/.exec(s.url);
+    return m && !ours.has(Number(m[1]));
+  });
   const sel = data.engines.find((e) => e.id === picked) ?? running ?? groupEngines(data.engines)[0]!.engines[0]!;
   const other = running && running.id !== sel.id ? running : null;
   const kind: "load" | "stop" = sel.state === "loading" || sel.state === "ready" ? "stop" : "load";
@@ -109,9 +119,10 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
     : sel.state === "stopping" ? "Stopping…"
     : sel.state === "loading" ? "Abort"
     : sel.state === "ready" ? "Stop"
+    : elsewhere.length ? "Another Strata server is running"
     : other ? "Switch to this model"
     : "Load";
-  const disabled = action.isPending || sel.state === "stopping";
+  const disabled = action.isPending || sel.state === "stopping" || (kind === "load" && elsewhere.length > 0);
   const danger = kind === "stop";
   const dot = { ready: c.statusSuccess, loading: c.statusWarning, stopping: c.statusWarning, failed: c.statusDanger, stopped: c.border };
 
@@ -153,6 +164,12 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
         {status(sel)}
         {other ? ` · ${other.provider} ${other.quant} is ${other.state}; loading this stops it` : ""}
       </Text>
+      {elsewhere.length ? (
+        <Text style={{ color: c.statusWarning, fontSize: 12 }}>
+          Running outside this plugin: {elsewhere.map((s) => `${s.model ?? "Strata"} at ${s.url}`).join(", ")}. Stop it where it was
+          started (Strata app, terminal or service) to load a model here.
+        </Text>
+      ) : null}
       <Text style={[styles.label, { fontSize: 12 }]}>
         {sel.name} · {sel.launcher}
       </Text>

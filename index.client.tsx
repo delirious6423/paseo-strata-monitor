@@ -10,7 +10,7 @@ const n = (v: number | null | undefined) => (v ? Math.round(v) : "–");
 // Always visible in the sidebar: speeds in the label, click opens the detail screen.
 function StrataItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   const { data } = useStrata();
-  const changing = useEngines().data?.engines.find((e) => e.state === "loading" || e.state === "stopping");
+  const changing = useEngines(15_000).data?.engines.find((e) => e.state === "loading" || e.state === "stopping");
   const busy = data?.state === "generating";
   const label = !data
     ? "Strata"

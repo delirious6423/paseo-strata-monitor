@@ -240,6 +240,8 @@ test("malformed settings and metadata skip that part only", async () => {
   const d = await discover(o);
   assert.deepEqual(d.models.map((m) => [bare(m.id), m.provider]).sort(), [["cfg:good", "Alpha"], ["cfg:odd", "Unknown provider"], ["cfg:x", "Unknown provider"]]);
   assert.equal(d.models.find((m) => bare(m.id) === "cfg:x")?.quant, "EXL3 EXL3");
+  writeFileSync(join(inst, "strata-broken.json"), "{ nope");
+  assert.match((await discover(o)).places.find((p) => p.path === inst)?.note ?? "", /^1 JSON file skipped/);
   delete o.env.STRATA_INSTALL_DIR;
   await discover(o); // the broken settings file alone must not throw
 });

@@ -1,3 +1,4 @@
+import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
@@ -20,6 +21,18 @@ function Bar({ value, color, track }: { value: number; color: string; track: str
   );
 }
 
+export const makeStyles = (c: PluginTheme["colors"], compact: boolean) => ({
+  screen: { flex: 1, backgroundColor: c.surface0 },
+  body: { padding: compact ? 16 : 24, gap: compact ? 12 : 16 },
+  card: { padding: 14, gap: 8, borderRadius: 10, backgroundColor: c.surface1 },
+  title: { color: c.foreground, fontSize: compact ? 18 : 20, fontWeight: "600" as const },
+  big: { color: c.foreground, fontSize: compact ? 36 : 44, fontWeight: "600" as const },
+  label: { color: c.foregroundMuted, fontSize: 13 },
+  value: { color: c.foreground, fontSize: 14 },
+  row: { flexDirection: "row" as const, justifyContent: "space-between" as const, gap: 12 },
+});
+export type Styles = ReturnType<typeof makeStyles>;
+
 export function Monitor({ theme, layout, openSettings }: PluginScreenProps & { openSettings?: () => void }) {
   const { data, error } = useStrata();
 
@@ -34,20 +47,7 @@ export function Monitor({ theme, layout, openSettings }: PluginScreenProps & { o
   }, [data]);
 
   const c = theme.colors;
-  const pad = layout.compact ? 16 : 24;
-  const styles = useMemo(
-    () => ({
-      screen: { flex: 1, backgroundColor: c.surface0 },
-      body: { padding: pad, gap: layout.compact ? 12 : 16 },
-      card: { padding: 14, gap: 8, borderRadius: 10, backgroundColor: c.surface1 },
-      title: { color: c.foreground, fontSize: layout.compact ? 18 : 20, fontWeight: "600" as const },
-      big: { color: c.foreground, fontSize: layout.compact ? 36 : 44, fontWeight: "600" as const },
-      label: { color: c.foregroundMuted, fontSize: 13 },
-      value: { color: c.foreground, fontSize: 14 },
-      row: { flexDirection: "row" as const, justifyContent: "space-between" as const, gap: 12 },
-    }),
-    [c, pad, layout.compact],
-  );
+  const styles = useMemo(() => makeStyles(c, layout.compact), [c, layout.compact]);
 
   const controls = <Controls theme={theme} styles={styles} openSettings={openSettings} />;
   if (!data) {
@@ -70,7 +70,7 @@ export function Monitor({ theme, layout, openSettings }: PluginScreenProps & { o
   return <Online data={data} history={history} styles={styles} colors={c} controls={controls} />;
 }
 
-function Stat({ styles, label, value }: { styles: any; label: string; value: string }) {
+function Stat({ styles, label, value }: { styles: Styles; label: string; value: string }) {
   return (
     <View style={styles.row}>
       <Text style={styles.label}>{label}</Text>
@@ -81,7 +81,7 @@ function Stat({ styles, label, value }: { styles: any; label: string; value: str
 
 function Online({
   data, history, styles, colors, controls,
-}: { data: Snapshot; history: number[]; styles: any; colors: any; controls: ReactNode }) {
+}: { data: Snapshot; history: number[]; styles: Styles; colors: PluginTheme["colors"]; controls: ReactNode }) {
   const peak = Math.max(10, ...history);
   const busy = data.state === "generating";
   return (

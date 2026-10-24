@@ -135,13 +135,17 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
   const byConfig = new Map<string, Found>();
   const firstInstall = { path: null as string | null };
 
+  let skipped = 0;
+  const unreadable = () => (skipped ? `${skipped} JSON file${skipped === 1 ? "" : "s"} skipped: not a readable Strata run config` : undefined); // configs that could not be read, per place (reset by each place)
   const addConfig = async (config: string, launcher: Launcher | null, source: string): Promise<boolean> => {
     const key = await real(config);
     if (byConfig.has(key)) return false;
     const rc = await readRunConfig(config);
-    if (!rc) return false;
-    const card = await cardFor(rc).catch(() => null); // one odd model must not hide the others
-    if (!card) return false;
+    const card = rc && (await cardFor(rc).catch(() => null)); // one odd model must not hide the others
+    if (!card) {
+      skipped++;
+      return false;
+    }
     const chosen: Launcher | null = launcher ?? (firstInstall.path ? { kind: "strata", install: firstInstall.path } : null);
     if (!chosen) return false;
     // Stable across rescans: the config's real path decides the id (and so the paseo-* profile it owns).
@@ -156,25 +160,28 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
   if (opts.systemd !== false && !o.windows && process.platform !== "darwin") {
     const units = await systemdUnits(o);
     let n = 0;
+    skipped = 0;
     for (const u of units) if (await addConfig(u.config, { kind: "systemd", unit: u.unit }, `service ${u.unit}`)) n++;
-    places.push({ path: systemdUserDir(o), source: "systemd user services", models: n });
+    places.push({ path: systemdUserDir(o), source: "systemd user services", models: n, note: unreadable() });
   }
   for (const p of await installPlaces(o)) {
     const configs = (await list(p.path)).filter(isStrataConfigName);
     if (configs.length && !firstInstall.path) firstInstall.path = p.path;
     let n = 0;
+    skipped = 0;
     for (const c of configs) if (await addConfig(join(p.path, c), { kind: "strata", install: p.path }, `Strata install ${p.path}`)) n++;
-    places.push({ path: p.path, source: p.source, models: n, note: (await isDir(p.path)) ? undefined : "not found" });
+    places.push({ path: p.path, source: p.source, models: n, note: (await isDir(p.path)) ? unreadable() : "not found" });
   }
   for (const folder of opts.extraFolders ?? []) {
     let n = 0;
+    skipped = 0;
     for (const f of (await list(folder)).filter((x) => x.endsWith(".json") && !x.endsWith(".shared-settings.json"))) {
       if (await addConfig(join(folder, f), null, `folder ${folder}`)) n++;
     }
     const exists = await isDir(folder);
     places.push({
       path: folder, source: "plugin settings", models: n,
-      note: !exists ? "not found" : !firstInstall.path && n === 0 ? "needs a Strata install to run configs" : undefined,
+      note: !exists ? "not found" : !firstInstall.path && n === 0 ? "needs a Strata install to run configs" : unreadable(),
     });
   }
   return { models: [...byConfig.values()], places };
