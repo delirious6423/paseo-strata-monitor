@@ -14,6 +14,14 @@ ready only with `loaded: true`; Windows `.cmd` lines refuse `%`/`!`/quotes; EXL3
 fake `systemctl` that is slow on `reset-failed`: an Abort in that window, or one Stop after several Loads, never
 lets the model start. A polling test counts full scans with a decoy: a stop or failed load rescans once (not
 for minutes); a started model is scanned for on every poll, even while another server answers, until its port does.
+`server/tools.test.ts`: parsing Strata's bench, tune, update and presets output; before/after speed (real Gyro-S
+numbers: same settings are "no clear change"; different concurrency or repeat counts are not compared); and,
+against the fake CLI, a check during Autotune not taking over its Cancel, Cancel while a tool is still preparing,
+two presses at once (one runs), two Saved tuning changes at once, a cancelled update reporting what is installed,
+and the plugin working again after an unload and reload. `server/idle.test.ts`: idle stop after the set minutes,
+and never for a request, a queue, generating, a missing counter, another server on the same port, a running tool
+(also one that starts during the stop), or the setting switched off mid-look. 43 tests; the tests for the
+concurrency and idle-stop fixes were checked to fail with the fix removed.
 
 ## End-to-end in throwaway VMs
 
@@ -38,7 +46,7 @@ preset; the 4 EXL3 models are flagged as not applying presets.
 The VM runners come from the dotfiles repo (`DOTFILES_ROOT`, default `~/code/dotfiles`); each refuses to touch an
 existing run and discards its own VM afterwards.
 
-| Target | Command | Last result (2026-10-24) |
+| Target | Command | Last result (2026-10-25) |
 |---|---|---|
 | Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 38/38 |
 | Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 38/38 |
@@ -53,11 +61,15 @@ the Load guard against a foreign Strata server is skipped for that scan (it fail
 ## Screenshots
 
 `tests/vm/screenshot.sh` runs the real Paseo daemon from the Paseo AppImage (as Node) in a throwaway Incus VM,
-installs the plugin from a `git archive` of HEAD (what a public install gets, no `node_modules`), builds a demo
+installs the plugin from the working tree's git-visible files (what a public install gets, no `node_modules`), builds a demo
 Strata machine (`tests/vm/demo.mjs`: the author's model line-up as sparse files with real-shaped metadata) and
-lets the host's Brave (headless, `puppeteer-core`) press Load in Paseo's web client and capture desktop and phone,
-light and dark, plus the settings screen into `assets/`. Last run 2026-10-24: plugin `running`, Load reached Ready.
+lets the host's Brave (headless, `puppeteer-core`) press Load and Benchmark in Paseo's web client and capture
+desktop and phone, light and dark, the Tools section after Check for updates, and the settings screen into
+`assets/`. Last run 2026-10-25: plugin `running`, Load reached Ready, the benchmark result shown.
 
-Not covered by the VMs: the real Strata CLI and engine (no GPU or models in a VM; the real `profile`/`runtime`
-path was run on the author's Linux machine with a real model, as were the systemd path and analytics), and the
+Not covered by the VMs: the real Strata CLI and engine (no GPU or models in a VM). Run on the author's Linux
+machine with real models instead: the `profile`/`runtime` and systemd paths, analytics, update check, benchmark,
+autotune with before/after and its Cancel, and Saved tuning read/delete/apply. Not run for real: Install update,
+Undo update and Re-check (they would change the author's Strata), and idle stop's timer (its decisions are unit
+tested; the VMs run it against the fake server). Also not covered: the
 Paseo app UI itself (no automated UI test; check the Strata screen and settings by hand after UI changes).

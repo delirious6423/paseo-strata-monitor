@@ -29,7 +29,8 @@ the Strata models on your machine, load or stop one with a click, and watch the 
 paseo plugin add git:delirious6423/paseo-strata-monitor
 ```
 
-Requires Paseo 0.12.0 or later. Works on Linux, Windows and macOS.
+Requires Paseo 0.12.0 or later (in use on 0.13.0) and a Strata install. Works on Linux, Windows and macOS.
+What changed in each version: [CHANGELOG.md](CHANGELOG.md); latest release notes: [docs/releases/0.2.0.md](docs/releases/0.2.0.md).
 
 ## How it finds models
 
@@ -60,7 +61,9 @@ are the weight files on disk (split GGUFs summed, linked files counted once).
 
 ## How the tools run
 
-All three use the Strata command-line tool of the first Strata install that has one (else `strata` on PATH):
+Each uses Strata's command-line tool: the model's own install's when it has one, else the first Strata install
+that has one, else `strata` on PATH (systemd-run models record no install, so they get the first one). One tool
+runs at a time; Load, and Saved tuning changes, wait until it ends.
 
 - Benchmark: `strata bench run --url <the model's server> --suite serving-smoke --out <new folder>`; reports go to
   the plugin's folder (`~/.local/state/paseo-strata/bench`, macOS `~/Library/Application Support/paseo-strata`,
@@ -81,11 +84,11 @@ All three use the Strata command-line tool of the first Strata install that has 
 - Idle stop: every 30 s the plugin reads the running server's `/metrics` (as the screen does); a model whose
   request total has not moved, with nothing queued and state `idle`, for the set minutes is stopped. A server it
   cannot read counts as busy. A running tool resets the count.
-- Undo update: `strata components rollback --output json --wait 0`, offered when `update --check` names a
-  previous engine.
 - Update: `strata update --check`, then `strata update --output jsonl --wait 0`. Strata switches to a new engine
   only after a test start and keeps the previous one (`strata components rollback`). An update installs into
   Strata's component folder; a run config that starts its own engine file is not changed, and the screen says so.
+- Undo update: `strata components rollback --output json --wait 0`, offered when `update --check` names a
+  previous engine.
 
 Cancel sends Ctrl+C (Windows: ends the process tree, so Strata gets no chance to tidy up; it keeps the previous
 engine until a new one passed its test start). Strata installs engine and control separately, so a cancelled update
@@ -104,6 +107,12 @@ shows the sidebar row or the Strata screen.
 
 ## Limits
 
+- The before/after speed is a rough check (the same quick benchmark a few minutes apart, not a controlled test).
+- Every autotune saves a preset, also when nothing changed; delete extras under Saved tuning.
+- Idle stop needs the model's own server to answer `/metrics`; a model it cannot read is never stopped.
+- Saved tuning changes are serialized within the plugin, not against the Strata app changing presets at the
+  same moment.
+
 - "A Strata server the plugin did not start" means a local listener owned by a Strata server process
   (`serve/server.py`) whose `/health` answers. One that is still loading, or listening only on a LAN address,
   is not seen, so Load is not blocked by it.
@@ -115,7 +124,9 @@ shows the sidebar row or the Strata screen.
 ## Privacy
 
 The plugin reads local files listed above and talks only to Strata servers: loopback ports on this machine,
-plus any URL you add or saved in a Strata connection. It sends nothing anywhere else and has no telemetry.
+plus any URL you add or saved in a Strata connection. It has no telemetry. Check for updates and Install update
+run Strata's own CLI, which contacts Strata's signed update feed (and downloads from it on Install); Benchmark
+and Autotune run only against this machine's server and GPU.
 A bearer token is sent only to a server whose unauthenticated `/health` already identified it as Strata: a saved
 connection's own `credential_env` to that connection, and `STRATA_API_KEY` from the daemon's environment to
 servers on this machine or URLs you added. A saved connection never falls back to `STRATA_API_KEY`.
@@ -136,7 +147,7 @@ Cross-platform end-to-end checks in throwaway VMs: [TESTING.md](TESTING.md).
 |---|---|---|---|
 | ![Strata screen on a phone](assets/phone.png) | ![Strata screen on a phone, dark theme](assets/phone-dark.png) | ![Benchmark result and update check](assets/phone-tools.png) | ![Model discovery settings](assets/settings.png) |
 
-Screenshots: Paseo 0.12.0 in a throwaway VM with demo models (real names and sizes, empty weights) and a stand-in
+Screenshots (2026-10-25): the Paseo AppImage installed here, in a throwaway VM with demo models (real names and sizes, empty weights) and a stand-in
 Strata server and CLI, so the speeds, benchmark and versions are made up; `tests/vm/screenshot.sh` recreates them.
 
 MIT licensed.

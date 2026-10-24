@@ -1,7 +1,7 @@
 {
   "id": "strata-monitor",
   "name": "Strata",
-  "description": "Find, load and stop local Strata models from Paseo, with live server speed and load",
+  "description": "Find, load and stop local Strata models from Paseo: benchmark, autotune, saved tuning, updates and live server speed",
   "requirements": {
     "paseo": ">=0.12.0"
   },
