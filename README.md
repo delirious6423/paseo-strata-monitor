@@ -4,7 +4,8 @@ A [Paseo](https://paseo.sh) plugin for a local [Strata](https://github.com/niko1
 the Strata models on your machine, load or stop one with a click, and watch the server's live speed and load.
 
 - **Model picker**: every Strata model found on the machine, grouped by quant provider (and by model family when
-  there are several), smallest first. Load, Abort while loading, Stop; loading one model stops the other first.
+  there are several), smallest first. Load, Abort while loading, Stop; loading one model stops the other first. One load or stop runs at a time, even
+  with several Paseo clients, and a Strata server the plugin did not start blocks Load until you stop it.
 - **Live status**: an always-visible sidebar row with prefill and decode tok/s, and a screen with a speed graph,
   queue, GPU/RAM use and recent requests.
 
@@ -38,11 +39,14 @@ are the weight files on disk (split GGUFs summed, linked files counted once).
 - A model run by a systemd user unit: `systemctl --user start|stop <unit>`.
 - Any other model: Strata's own command-line tool from its install (`bin/strata`, or `strata` on PATH):
   `strata profile create paseo-<model> --from-config <run config>`, then `strata runtime start|status|stop`.
-  These `paseo-*` profiles live in Strata's profile folder; delete them there to undo.
+  These `paseo-<model>-<hash>` profiles (the hash is of the run config's path) live in Strata's profile folder;
+  delete them there to undo. On Windows, paths containing `%`, `!` or `"` are refused rather than passed through
+  `cmd.exe`, which would expand them.
+- A model counts as ready when its server's `/health` reports a Strata server with the model loaded.
 
 ## How it finds a running server (live status)
 
-Every 10 seconds it collects candidates and keeps those whose `/metrics` answer in Strata's format:
+Every 10 seconds it collects candidates and keeps those whose `/health` says they are Strata, then reads `/metrics`:
 URLs you add in the plugin settings; local TCP listeners owned by a Strata server process (`serve/server.py`,
 found via `/proc` on Linux, `lsof` on macOS, PowerShell `Get-NetTCPConnection` on Windows); the ports in the
 found run configs; Strata's saved monitor connections (`strata_cli` connections folder); ports 8095 and 8080.
@@ -53,7 +57,9 @@ shows the sidebar row or the Strata screen.
 
 The plugin reads local files listed above and talks only to Strata servers: loopback ports on this machine,
 plus any URL you add or saved in a Strata connection. It sends nothing anywhere else and has no telemetry.
-A bearer token comes from `STRATA_API_KEY` in the daemon's environment or a saved connection's `credential_env`.
+A bearer token is sent only to a server whose unauthenticated `/health` already identified it as Strata: a saved
+connection's own `credential_env` to that connection, and `STRATA_API_KEY` from the daemon's environment to
+servers on this machine or URLs you added. A saved connection never falls back to `STRATA_API_KEY`.
 
 ## Develop
 

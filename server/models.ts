@@ -11,6 +11,7 @@ export type RunConfig = { exe: string; args: string[]; model_name?: string; port
 export type ModelCard = {
   name: string;
   port: number;
+  host: string | null;
   format: "gguf" | "exl3" | "other";
   quant: string;
   family: string;
@@ -36,15 +37,30 @@ const flag = (args: string[], f: string) => {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
 };
 
-/** `X-00001-of-00003.gguf` and its siblings. */
-async function withSplits(file: string): Promise<string[]> {
+const MAX_PARTS = 64;
+
+/** A small JSON object from disk, or {} when missing, too big, malformed or not an object. */
+export async function smallJson(path: string): Promise<Record<string, any>> {
+  try {
+    if ((await stat(path)).size > 1 << 20) return {};
+    const v = JSON.parse(await readFile(path, "utf8"));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** `X-00001-of-00003.gguf` and its siblings; null past MAX_PARTS (size unknown rather than understated). */
+function withSplits(file: string): string[] | null {
   const m = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(basename(file));
   if (!m) return [file];
   const n = Number(m[3]);
-  return Array.from({ length: Math.min(n, 64) }, (_, i) => join(dirname(file), `${m[1]}-${String(i + 1).padStart(5, "0")}-of-${m[3]}.gguf`));
+  if (n > MAX_PARTS) return null;
+  return Array.from({ length: n }, (_, i) => join(dirname(file), `${m[1]}-${String(i + 1).padStart(5, "0")}-of-${m[3]}.gguf`));
 }
 
-async function weightFiles(args: string[]): Promise<{ format: ModelCard["format"]; files: string[]; dir: string | null }> {
+type Weights = { format: ModelCard["format"]; files: string[]; dir: string | null; partial?: boolean };
+async function weightFiles(args: string[]): Promise<Weights> {
   const exl3 = flag(args, "--exl3");
   if (exl3) {
     const files = (await readdir(exl3).catch(() => [] as string[])).filter((f) => f.endsWith(".safetensors")).map((f) => join(exl3, f));
@@ -52,10 +68,10 @@ async function weightFiles(args: string[]): Promise<{ format: ModelCard["format"
   }
   const native = flag(args, "--native") ?? flag(args, "--model") ?? flag(args, "-m");
   if (native && native.toLowerCase().endsWith(".gguf")) {
-    const files = new Set(await withSplits(native));
     const ple = flag(args, "--ple-gguf");
-    if (ple) for (const f of await withSplits(ple)) files.add(f);
-    return { format: "gguf", files: [...files], dir: null };
+    const parts = [withSplits(native), ...(ple ? [withSplits(ple)] : [])];
+    const files = new Set(parts.flatMap((p, i) => p ?? [i ? ple! : native]));
+    return { format: "gguf", files: [...files], dir: null, partial: parts.some((p) => !p) };
   }
   return { format: "other", files: [], dir: null };
 }
@@ -125,15 +141,17 @@ async function describe(format: ModelCard["format"], files: string[], dir: strin
   let meta: Meta;
   if (format === "gguf") {
     const g = (await readGgufMeta(files[0]!)) ?? {};
-    const name = typeof g.name === "string" ? g.name : null;
+    const text = (v: unknown) => (typeof v === "string" ? v : undefined); // header values are untrusted
+    const name = text(g.name) ?? null;
     meta = {
       quant: QUANT.exec(basename(files[0]!))?.[0]?.toUpperCase() ?? "GGUF",
-      family: familyOf(g.basename as string, name?.split(" ")[0], hf && stripTail(hf[1]), fileStem(files[0]!), g.architecture as string),
-      provider: (g.quantized_by as string) || hf?.[0] || repoOrg(g.repo_url) || (g.organization as string) || "Unknown provider",
+      family: familyOf(text(g.basename), name?.split(" ")[0], hf && stripTail(hf[1]), fileStem(files[0]!), text(g.architecture)),
+      provider: text(g.quantized_by) || hf?.[0] || repoOrg(text(g.repo_url)) || text(g.organization) || "Unknown provider",
     };
   } else if (format === "exl3" && dir) {
-    const q = JSON.parse(await readFile(join(dir, "quantization_config.json"), "utf8").catch(() => "{}"));
-    const card = frontMatter(await readFile(join(dir, "README.md"), "utf8").catch(() => ""));
+    const q = (await smallJson(join(dir, "quantization_config.json"))) as Record<string, unknown>;
+    const readme = join(dir, "README.md");
+    const card = frontMatter(((await stat(readme).catch(() => null))?.size ?? Infinity) < 1 << 20 ? await readFile(readme, "utf8").catch(() => "") : "");
     const bits = typeof q.bits === "number" ? `${q.bits} bpw` : "EXL3";
     meta = {
       quant: `EXL3 ${bits}${typeof q.head_bits === "number" ? ` h${q.head_bits}` : ""}`,
@@ -148,8 +166,10 @@ async function describe(format: ModelCard["format"], files: string[], dir: strin
 }
 
 export async function cardFor(config: RunConfig): Promise<ModelCard> {
-  const { format, files, dir } = await weightFiles(config.args);
+  const { format, files, dir, partial } = await weightFiles(config.args);
   const name = typeof config.model_name === "string" ? config.model_name : basename(config.exe);
-  const [sizeBytes, meta] = await Promise.all([totalSize(files), describe(format, files, dir, name)]);
-  return { name, port: typeof config.port === "number" ? config.port : 8095, format, sizeBytes, weights: files, ...meta };
+  const [sizeBytes, meta] = await Promise.all([partial ? null : totalSize(files), describe(format, files, dir, name)]);
+  const port = Number(flag(config.args, "--port") ?? config.port);
+  const host = flag(config.args, "--host") ?? (typeof config.host === "string" ? config.host : null);
+  return { name, port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 8095, host, format, sizeBytes, weights: files, ...meta };
 }

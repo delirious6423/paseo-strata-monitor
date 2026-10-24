@@ -7,13 +7,14 @@ import { DEFAULT_PORTS, type Os, connectionDir, here } from "./places";
 // Where the analytics read from: every Strata server this machine can see, found again every 10 s from
 // (1) URLs set in the plugin settings, (2) local listeners owned by a Strata server process,
 // (3) the ports of discovered models, (4) Strata's saved monitor connections, (5) Strata's default ports.
-// A candidate counts only if its /metrics answers with Strata's shape.
+// A candidate counts only if its unauthenticated /health says it is Strata; only then is a key sent to /metrics.
 
 const TIMEOUT_MS = 1500;
 const CACHE_MS = 400;
 const ENDPOINTS_MS = 10_000;
 
-type Endpoint = { url: string; key?: string };
+/** `key`: an explicit credential; `global`: may receive $STRATA_API_KEY (this machine or a URL the user set). */
+type Endpoint = { url: string; key?: string; global?: boolean };
 
 let extraUrls: string[] = [];
 let portsOf: () => Promise<number[]> = async () => [];
@@ -23,10 +24,11 @@ export function configureEndpoints(next: { extraUrls?: string[]; knownPorts?: ()
   if (next.knownPorts) portsOf = next.knownPorts;
   if (o) os = o;
   servers = { at: 0, list: [] };
+  lastOffline = null;
 }
 
 const root = (u: string) => u.trim().replace(/\/+$/, "");
-const local = (port: number): Endpoint => ({ url: `http://127.0.0.1:${port}` });
+const local = (port: number): Endpoint => ({ url: `http://127.0.0.1:${port}`, global: true });
 
 /** Strata's saved connections: {url, prefix, credential_env}; the credential stays in that env variable. */
 export async function savedConnections(o: Os): Promise<Endpoint[]> {
@@ -36,8 +38,10 @@ export async function savedConnections(o: Os): Promise<Endpoint[]> {
     try {
       const c = JSON.parse(await readFile(join(dir, f), "utf8"));
       if (typeof c.url !== "string" || !/^https?:\/\//.test(c.url)) continue;
-      const key = typeof c.credential_env === "string" ? o.env[c.credential_env] : undefined;
-      out.push({ url: root(c.url) + (typeof c.prefix === "string" ? c.prefix : ""), key });
+      // Its own credential or none: a missing variable never falls back to $STRATA_API_KEY.
+      const key = typeof c.credential_env === "string" ? o.env[c.credential_env] || undefined : undefined;
+      const prefix = typeof c.prefix === "string" && /^\/[\w./-]*$/.test(c.prefix) ? root(c.prefix) : "";
+      out.push({ url: root(c.url) + prefix, key });
     } catch {}
   }
   return out;
@@ -45,14 +49,23 @@ export async function savedConnections(o: Os): Promise<Endpoint[]> {
 
 export async function candidates(): Promise<Endpoint[]> {
   const list: Endpoint[] = [
-    ...extraUrls.filter((u) => /^https?:\/\//.test(u)).map((u) => ({ url: root(u) })),
+    ...extraUrls.filter((u) => /^https?:\/\//.test(u)).map((u) => ({ url: root(u), global: true })),
     ...(await strataListeners().catch(() => [])).map(local),
     ...(await portsOf().catch(() => [])).map(local),
     ...(await savedConnections(os)),
     ...DEFAULT_PORTS.map(local),
   ];
-  const seen = new Set<string>();
-  return list.filter((e) => !seen.has(e.url) && seen.add(e.url));
+  return mergeEndpoints(list);
+}
+
+/** One entry per URL, keeping an explicit credential wherever it came from. */
+export function mergeEndpoints(list: Endpoint[]): Endpoint[] {
+  const byUrl = new Map<string, Endpoint>();
+  for (const e of list) {
+    const had = byUrl.get(e.url);
+    byUrl.set(e.url, had ? { url: e.url, key: had.key ?? e.key, global: had.global || e.global } : e);
+  }
+  return [...byUrl.values()];
 }
 
 type Json = Record<string, unknown>;
@@ -103,11 +116,27 @@ export function toSnapshot(url: string, raw: unknown): Snapshot {
 /** Strata's /metrics carries an engine or live section; anything else on that port is not Strata. */
 export const isStrataMetrics = (raw: unknown) => !!raw && typeof raw === "object" && ("engine" in raw || "live" in raw);
 
-async function fetchMetrics({ url, key }: Endpoint): Promise<Snapshot> {
+/** Strata's /health needs no key and names the service; ready = the engine is loaded. */
+export async function strataHealth(url: string, timeoutMs = TIMEOUT_MS): Promise<{ loaded: boolean } | null> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${url}/health`, { signal: abort.signal, redirect: "error" });
+    const body = obj(await res.json().catch(() => null));
+    return res.ok && body.service === "strata" ? { loaded: body.loaded !== false } : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchMetrics({ url, key, global }: Endpoint, verified = false): Promise<Snapshot> {
+  if (!verified && !(await strataHealth(url))) throw new Error("not a Strata server");
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
-    const bearer = key ?? process.env.STRATA_API_KEY;
+    const bearer = key ?? (global ? process.env.STRATA_API_KEY : undefined);
     const res = await fetch(`${url}/metrics`, {
       headers: bearer ? { Authorization: `Bearer ${bearer}` } : undefined,
       signal: abort.signal,
@@ -129,7 +158,7 @@ let cached: { at: number; value: Snapshot } | null = null;
 
 async function scan(): Promise<Snapshot> {
   const list = await candidates();
-  const ok = (await Promise.allSettled(list.map(fetchMetrics))).flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  const ok = (await Promise.allSettled(list.map((e) => fetchMetrics(e)))).flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
   servers = { at: Date.now(), list: ok.map((s) => ({ url: s.url ?? "", model: s.model })) };
   if (!ok.length) {
     lastGood = null;
@@ -141,14 +170,21 @@ async function scan(): Promise<Snapshot> {
   return { ...best, servers: servers.list };
 }
 
+let lastOffline: Snapshot | null = null;
+
 async function probe(): Promise<Snapshot> {
   // Steady state: one request to the last working server; a full scan every 10 s or when it stops answering.
-  if (lastGood && Date.now() - servers.at < ENDPOINTS_MS) {
+  // With nothing running, the scan (a process listing: PowerShell/lsof on Windows/macOS) also waits 10 s.
+  const recent = Date.now() - servers.at < ENDPOINTS_MS;
+  if (lastGood && recent) {
     try {
-      return { ...(await fetchMetrics(lastGood)), servers: servers.list };
+      return { ...(await fetchMetrics(lastGood, true)), servers: servers.list };
     } catch {}
   }
-  return scan();
+  if (!lastGood && recent && lastOffline) return lastOffline;
+  const snap = await scan();
+  lastOffline = snap.online ? null : snap;
+  return snap;
 }
 
 /** Coalesces concurrent callers (several clients/hosts) into one upstream request. */

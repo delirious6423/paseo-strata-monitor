@@ -3,7 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Engine } from "../shared/control";
 import { type Discovery, type Found, discover } from "./discover";
+import { strataListeners } from "./listeners";
 import { type Os, cliIn, here, profileDir } from "./places";
+import { strataHealth } from "./strata";
 
 // Start/stop through what already owns a model: its systemd user unit (Linux), else Strata's own
 // `profile` + `runtime` commands (all platforms), using plugin-owned profiles named `paseo-<model>`.
@@ -30,6 +32,14 @@ export function discovery(rescan = false): Promise<Discovery> {
   return value;
 }
 
+/** The `cmd.exe /s /c` line for a .cmd launcher. cmd.exe expands %VAR% and !VAR! even inside quotes and has
+ * no reliable escape there, so arguments with those (or a quote / line break) are refused, never mangled. */
+export function cmdExeLine(cmd: string, args: string[]): string {
+  const bad = [cmd, ...args].find((a) => /[%!"\r\n]/.test(a));
+  if (bad !== undefined) throw new Error(`Cannot pass ${JSON.stringify(bad)} to ${cmd} safely (it contains % ! or a quote); rename that path`);
+  return `"${[cmd, ...args].map((a) => `"${a}"`).join(" ")}"`;
+}
+
 function run(cmd: string, args: string[], timeout = 15_000, env?: Record<string, string>): Promise<string> {
   return new Promise((resolveRun, reject) => {
     const done = (error: Error | null, stdout: string, stderr: string) => {
@@ -37,8 +47,13 @@ function run(cmd: string, args: string[], timeout = 15_000, env?: Record<string,
       else resolveRun(stdout); // Strata's --output json reports errors in stdout with a non-zero exit
     };
     if (os.windows && /\.(cmd|bat)$/i.test(cmd)) {
-      const q = (a: string) => `"${a.replace(/"/g, '""')}"`;
-      execFile("cmd.exe", ["/d", "/s", "/c", `"${[cmd, ...args].map(q).join(" ")}"`],
+      let line: string;
+      try {
+        line = cmdExeLine(cmd, args);
+      } catch (e) {
+        return reject(e);
+      }
+      execFile("cmd.exe", ["/d", "/s", "/c", line],
         { timeout, maxBuffer: 1 << 20, windowsVerbatimArguments: true, windowsHide: true, env: env && { ...process.env, ...env } }, done);
     } else {
       execFile(cmd, args, { timeout, maxBuffer: 1 << 20, env: env && { ...process.env, ...env } }, done);
@@ -73,7 +88,7 @@ export function parseShow(out: string): Map<string, Unit> {
 }
 
 async function lastLog(unit: string): Promise<string | null> {
-  const out = await run("journalctl", ["--user", "-u", unit, "-n", "4", "--no-pager", "-o", "cat"]).catch(() => "");
+  const out = await run("journalctl", ["--user", `--unit=${unit}`, "-n", "4", "--no-pager", "-o", "cat"]).catch(() => "");
   return out.trim().split("\n").slice(-4).join("\n").slice(0, 500) || null;
 }
 
@@ -135,26 +150,31 @@ async function ensureProfile(f: Found & { launcher: { kind: "strata" } }): Promi
 
 const stopping = new Set<string>();
 
-async function answers(port: number): Promise<boolean> {
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), PROBE_MS);
-  try {
-    await fetch(`http://127.0.0.1:${port}/`, { signal: abort.signal, redirect: "manual" });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+/** Ready = a Strata server on that port says its engine is loaded (not merely: something answers HTTP). */
+const answers = async (f: Found) => {
+  const h = f.host && !/^(0\.0\.0\.0|::|\[::\]|localhost)$/.test(f.host) ? f.host : "127.0.0.1";
+  return (await strataHealth(`http://${h.includes(":") && !h.startsWith("[") ? `[${h}]` : h}:${f.port}`, PROBE_MS))?.loaded === true;
+};
 
 const launcherLabel = (f: Found) => (f.launcher.kind === "systemd" ? `systemd ${f.launcher.unit}` : `Strata runtime (${profileName(f)})`);
 
-export async function listEngines(rescan = false): Promise<{ engines: Engine[]; places: Discovery["places"] }> {
+// Several clients poll every 1-3 s; one listing serves them all for a moment (Strata's CLI is a Python start).
+const LIST_MS = 1500;
+let listing: { at: number; value: Promise<Listing> } | null = null;
+type Listing = { engines: Engine[]; places: Discovery["places"] };
+export function listEngines(rescan = false): Promise<Listing> {
+  if (!rescan && listing && Date.now() - listing.at < LIST_MS) return listing.value;
+  const value = listNow(rescan);
+  listing = { at: Date.now(), value };
+  value.catch(() => (listing = null));
+  return value;
+}
+
+async function listNow(rescan: boolean): Promise<Listing> {
   const d = await discovery(rescan);
   const units = d.models.flatMap((f) => (f.launcher.kind === "systemd" ? [f.launcher.unit] : []));
   const show = units.length
-    ? parseShow(await run("systemctl", ["--user", "show", "--timestamp=unix", "-p", "Id,ActiveState,Result,InactiveExitTimestamp", ...units]).catch(() => ""))
+    ? parseShow(await run("systemctl", ["--user", "show", "--timestamp=unix", "-p", "Id,ActiveState,Result,InactiveExitTimestamp", "--", ...units]).catch(() => ""))
     : new Map<string, Unit>();
   const engines = await Promise.all(
     d.models.map(async (f): Promise<Engine> => {
@@ -164,7 +184,7 @@ export async function listEngines(rescan = false): Promise<{ engines: Engine[]; 
       if (f.launcher.kind === "systemd") {
         const u = show.get(f.launcher.unit);
         const active = u?.activeState === "active" || u?.activeState === "activating";
-        if (active) state = (await answers(f.port)) ? "ready" : "loading";
+        if (active) state = (await answers(f)) ? "ready" : "loading";
         else if (u?.activeState === "deactivating") state = "stopping";
         else if (u?.activeState === "failed") state = "failed";
         sinceMs = active ? (u?.sinceMs ?? null) : null;
@@ -173,6 +193,7 @@ export async function listEngines(rescan = false): Promise<{ engines: Engine[]; 
         ({ state, error } = await runtimeState(f as Found & { launcher: { kind: "strata" } }).catch((e) => ({ state: "failed" as const, error: String(e.message ?? e) })));
       }
       if (stopping.has(f.id)) state = "stopping"; // cleared when `runtime stop` returns
+      if (stopErrors.has(f.id) && state !== "stopped") error = `Stop failed: ${stopErrors.get(f.id)}`;
       return {
         id: f.id, name: f.name, family: f.family, provider: f.provider, quant: f.quant, format: f.format, sizeBytes: f.sizeBytes,
         port: f.port, config: f.config, launcher: launcherLabel(f), source: f.source, state, sinceMs, error,
@@ -189,39 +210,77 @@ async function find(id: string): Promise<Found> {
 }
 
 async function stopNow(f: Found): Promise<void> {
-  if (f.launcher.kind === "systemd") await run("systemctl", ["--user", "stop", f.launcher.unit], STOP_TIMEOUT_MS);
-  else await strata(f.launcher.install, ["runtime", "stop", "--profile", profileName(f), "--wait", "85", "--output", "json"], STOP_TIMEOUT_MS);
+  if (f.launcher.kind === "systemd") {
+    await run("systemctl", ["--user", "stop", "--", f.launcher.unit], STOP_TIMEOUT_MS);
+    return;
+  }
+  const r = json(await strata(f.launcher.install, ["runtime", "stop", "--profile", profileName(f), "--wait", "85", "--output", "json"], STOP_TIMEOUT_MS));
+  if (r.ok !== true) throw new Error(`Strata runtime stop failed: ${r.error?.message ?? r.error ?? r.state ?? "no answer"}`);
 }
 
-export async function loadEngine(id: string): Promise<void> {
+// One load/stop at a time (several clients may press buttons), and Stop cancels a Load still preparing.
+let queue: Promise<unknown> = Promise.resolve();
+const exclusive = <T>(task: () => Promise<T>): Promise<T> => {
+  const next = queue.then(task, task);
+  queue = next.catch(() => {});
+  return next;
+};
+const cancelled = new Set<string>();
+const stopErrors = new Map<string, string>();
+
+/** Ports of Strata servers on this machine that no discovered, active model accounts for. */
+async function foreignServers(active: Engine[]): Promise<number[]> {
+  const ours = new Set(active.map((e) => e.port));
+  return (await strataListeners().catch(() => [] as number[])).filter((p) => !ours.has(p));
+}
+
+export function loadEngine(id: string): Promise<void> {
+  cancelled.delete(id);
+  stopErrors.delete(id);
+  return exclusive(() => load(id));
+}
+
+async function load(id: string): Promise<void> {
   const f = await find(id);
-  const { engines } = await listEngines();
-  const others = engines.filter((e) => e.id !== id && e.state !== "stopped" && e.state !== "failed");
-  // Blocking: the next model's port and GPU need the old one fully gone.
-  for (const o of others) await stopNow(await find(o.id));
+  const { engines } = await listNow(false); // fresh, not the shared cache
+  const active = engines.filter((e) => e.state !== "stopped" && e.state !== "failed");
+  const foreign = await foreignServers(active);
+  if (foreign.length) throw new Error(`A Strata server this plugin did not start is running on port ${foreign.join(", ")}; stop it first (one model at a time)`);
+  // Blocking: the next model's port and GPU need the old one fully gone. A failed stop aborts the load.
+  for (const o of active.filter((e) => e.id !== id)) await stopNow(await find(o.id));
+  if (active.some((e) => e.id === id)) return;
+  if (cancelled.delete(id)) return;
   if (f.launcher.kind === "systemd") {
-    await run("systemctl", ["--user", "reset-failed", f.launcher.unit]).catch(() => {});
-    await run("systemctl", ["--user", "start", "--no-block", f.launcher.unit]);
+    await run("systemctl", ["--user", "reset-failed", "--", f.launcher.unit]).catch(() => {});
+    await run("systemctl", ["--user", "start", "--no-block", "--", f.launcher.unit]);
     return;
   }
   const name = await ensureProfile(f as Found & { launcher: { kind: "strata" } });
+  if (cancelled.delete(id)) return;
   const r = json(await strata(f.launcher.install, ["runtime", "start", "--profile", name, "--wait", "0", "--output", "json"], 60_000));
   if (!r.ok) throw new Error(`Strata runtime start failed: ${r.error?.message ?? r.error ?? r.state ?? "unknown error"}`);
 }
 
 export async function stopEngine(id: string): Promise<void> {
+  cancelled.add(id); // a queued or preparing Load of this model will not start it
+  stopErrors.delete(id);
   const f = await find(id);
   if (f.launcher.kind === "systemd") {
     const unit = f.launcher.unit;
-    await run("systemctl", ["--user", "stop", "--no-block", unit]);
+    await run("systemctl", ["--user", "stop", "--no-block", "--", unit]);
     // Aborting during ExecStartPre marks the unit failed (result 'signal'); a user abort is not a failure.
-    void run("systemctl", ["--user", "stop", unit], STOP_TIMEOUT_MS)
-      .then(() => run("systemctl", ["--user", "reset-failed", unit]))
+    void run("systemctl", ["--user", "stop", "--", unit], STOP_TIMEOUT_MS)
+      .then(() => run("systemctl", ["--user", "reset-failed", "--", unit]))
       .catch(() => {});
     return;
   }
   stopping.add(id);
-  void stopNow(f).catch(() => {}).finally(() => stopping.delete(id));
+  void exclusive(() => stopNow(f))
+    .catch((e) => stopErrors.set(id, String(e.message ?? e).slice(0, 300)))
+    .finally(() => {
+      stopping.delete(id);
+      cancelled.delete(id);
+    });
 }
 
 /** Every configured port: the analytics try these besides the servers they find listening. */

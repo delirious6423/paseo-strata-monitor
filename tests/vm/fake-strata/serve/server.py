@@ -1,6 +1,6 @@
 // JavaScript, run by node, named like Strata's serve/server.py so its command line looks like a Strata server
 // to the plugin's listener scan. Stand-in for the VM tests: after a simulated 2 s load it serves / and a
-// Strata-shaped /metrics on --port.
+// Strata-shaped /health and /metrics on --port.
 const { readFileSync } = require("node:fs");
 const { createServer } = require("node:http");
 
@@ -12,7 +12,7 @@ setTimeout(() => {
   createServer((req, res) => {
     const body = req.url === "/metrics"
       ? { engine: { model: config.model_name, max_context: 4096 }, live: { state: "idle", queued: 0 }, hardware: {}, totals: { requests: 0 }, requests: [] }
-      : { ok: true };
+      : req.url === "/health" ? { status: "ok", service: "strata", loaded: true, model: config.model_name } : { ok: true };
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(body));
   }).listen(port, "127.0.0.1");

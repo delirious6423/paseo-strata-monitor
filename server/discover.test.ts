@@ -52,6 +52,9 @@ function install(dir: string, models: Record<string, { file: string; meta: [stri
   writeFileSync(join(dir, "strata-x.shared-settings.json"), "{}"); // not a run config
 }
 
+/** Ids carry a hash of the config's path; the tests compare the readable part. */
+const bare = (id: string) => id.replace(/-[0-9a-f]{8}$/, "");
+
 // ---------------------------------------------------------------- tests
 
 test("GGUF header: general keys, also after tokenizer arrays", () => {
@@ -76,11 +79,11 @@ test("Linux: finds installs from Strata's settings file, ignores shared-settings
   mkdirSync(join(home, ".config/strata"), { recursive: true });
   writeFileSync(join(home, ".config/strata/settings.json"), JSON.stringify({ installs: [inst] }));
   const d = await discover(o);
-  assert.deepEqual(d.models.map((m) => [m.id, m.quant, m.provider, m.family, m.launcher.kind]).sort(), [
+  assert.deepEqual(d.models.map((m) => [bare(m.id), m.quant, m.provider, m.family, m.launcher.kind]).sort(), [
     ["cfg:iq1", "IQ1_M", "Alpha", "Fam", "strata"],
     ["cfg:q2", "Q2_K", "Alpha", "Fam", "strata"],
   ]);
-  assert.equal(d.models.find((m) => m.id === "cfg:iq1")?.port, 8095);
+  assert.equal(d.models.find((m) => bare(m.id) === "cfg:iq1")?.port, 8095);
   assert.ok(d.places.some((p) => p.source === "Strata settings" && p.models === 2));
   assert.ok(d.places.some((p) => p.source === "Strata app" && p.note === "not found"));
 });
@@ -90,7 +93,7 @@ test("Windows: %APPDATA% settings and the app install under %LOCALAPPDATA%", asy
   const app = join(home, "Local", "Strata", "install");
   install(app, { iq3_s: { file: "M-IQ3_S.gguf", meta: [["general.quantized_by", 8, "Beta"]] } });
   const d = await discover(o);
-  assert.deepEqual(d.models.map((m) => [m.id, m.provider, m.source.startsWith("Strata install")]), [["cfg:iq3_s", "Beta", true]]);
+  assert.deepEqual(d.models.map((m) => [bare(m.id), m.provider, m.source.startsWith("Strata install")]), [["cfg:iq3_s", "Beta", true]]);
   assert.ok(!d.places.some((p) => p.source === "systemd user services"), "no systemd scan on Windows");
 });
 
@@ -101,7 +104,7 @@ test("STRATA_INSTALL_DIR is the only install looked at, like Strata", async () =
   mkdirSync(join(home, ".config/strata"), { recursive: true });
   writeFileSync(join(home, ".config/strata/settings.json"), JSON.stringify({ installs: [join(home, "a")] }));
   o.env.STRATA_INSTALL_DIR = join(home, "b");
-  assert.deepEqual((await discover(o)).models.map((m) => m.id), ["cfg:two"]);
+  assert.deepEqual((await discover(o)).models.map((m) => bare(m.id)), ["cfg:two"]);
 });
 
 test("systemd: template and plain units are adopted; non-Strata units ignored; no duplicates", async () => {
@@ -124,12 +127,12 @@ test("systemd: template and plain units are adopted; non-Strata units ignored; n
   writeFileSync(join(units, "fork.service"), `[Service]\nExecStart=${fork}/start.sh\n`);
   writeFileSync(join(units, "backup@.service"), `[Service]\nExecStart=/usr/bin/python3 /x/run.py --config "/x/config.json" backup %i\n`);
   const d = await discover(o);
-  assert.deepEqual(d.models.map((m) => [m.id, m.quant, m.provider, m.family, m.port]).sort(), [
+  assert.deepEqual(d.models.map((m) => [bare(m.id), m.quant, m.provider, m.family, m.port]).sort(), [
     ["unit:fork.service", "EXL3 2.05 bpw h8", "scorpoon", "Fam", 8093],
     ["unit:strata@iq3_s.service", "IQ3_S", "Alpha", "Q", 8080],
   ]);
   assert.equal(d.models.find((m) => m.id === "unit:fork.service")?.sizeBytes, 1000);
-  assert.equal((await discover(o, { systemd: false })).models.map((m) => m.id).join(), "cfg:iq3_s");
+  assert.equal((await discover(o, { systemd: false })).models.map((m) => bare(m.id)).join(), "cfg:iq3_s");
 });
 
 test("extra folders: any run config; skipped without an install to run it", async () => {
@@ -147,7 +150,7 @@ test("extra folders: any run config; skipped without an install to run it", asyn
   mkdirSync(join(home, ".config/strata"), { recursive: true });
   writeFileSync(join(home, ".config/strata/settings.json"), JSON.stringify({ installs: [join(home, "Strata")] }));
   d = await discover(o, { extraFolders: [extra] });
-  assert.deepEqual(d.models.map((m) => m.id).sort(), ["cfg:a", "cfg:gyro"]);
+  assert.deepEqual(d.models.map((m) => bare(m.id)).sort(), ["cfg:a", "cfg:gyro"]);
 });
 
 test("split GGUF sizes, HF cache provider, symlinked parts counted once", async () => {
@@ -204,4 +207,59 @@ test("listeners: /proc/net loopback LISTEN rows, lsof output, server command lin
   assert.ok(STRATA_SERVER.test("C:\\S\\python.exe C:\\S\\serve\\server.py"));
   assert.ok(STRATA_SERVER.test("python -m serve.server --config x"));
   assert.ok(!STRATA_SERVER.test("python3 -m http.server 8080"));
+});
+
+test("ids stay with their config when another config of the same name disappears", async () => {
+  const { home, o } = machine();
+  install(join(home, "a"), { foo: { file: "A-Q4_K_M.gguf", meta: [] } });
+  install(join(home, "b"), { foo: { file: "B-Q4_K_M.gguf", meta: [] } });
+  mkdirSync(join(home, ".config/strata"), { recursive: true });
+  writeFileSync(join(home, ".config/strata/settings.json"), JSON.stringify({ installs: [join(home, "a"), join(home, "b")] }));
+  const idOfB = async () => (await discover(o)).models.find((m) => m.config.startsWith(join(home, "b")))?.id;
+  const before = await idOfB();
+  rmSync(join(home, "a", "strata-foo.json"));
+  assert.equal(await idOfB(), before);
+  assert.match(before ?? "", /^cfg:foo-[0-9a-f]{8}$/);
+});
+
+test("malformed settings and metadata skip that part only", async () => {
+  const { home, o } = machine();
+  const inst = join(home, "Strata");
+  install(inst, {
+    good: { file: "G-Q4_K_M.gguf", meta: [["general.quantized_by", 8, "Alpha"]] },
+    odd: { file: "O-Q4_K_M.gguf", meta: [["general.basename", 4, 7], ["general.quantized_by", 4, 9]] }, // numbers, not text
+  });
+  const exl3 = join(inst, "models", "X-exl3");
+  mkdirSync(exl3, { recursive: true });
+  writeFileSync(join(exl3, "quantization_config.json"), "{not json");
+  writeFileSync(join(exl3, "README.md"), "---\nbase_model: org/Fam\n---\n");
+  writeFileSync(join(inst, "strata-x.json"), JSON.stringify({ exe: "e", args: ["--exl3", exl3], model_name: "x" }));
+  mkdirSync(join(home, ".config/strata"), { recursive: true });
+  writeFileSync(join(home, ".config/strata/settings.json"), "{ broken");
+  o.env.STRATA_INSTALL_DIR = inst;
+  const d = await discover(o);
+  assert.deepEqual(d.models.map((m) => [bare(m.id), m.provider]).sort(), [["cfg:good", "Alpha"], ["cfg:odd", "Unknown provider"], ["cfg:x", "Unknown provider"]]);
+  assert.equal(d.models.find((m) => bare(m.id) === "cfg:x")?.quant, "EXL3 EXL3");
+  delete o.env.STRATA_INSTALL_DIR;
+  await discover(o); // the broken settings file alone must not throw
+});
+
+test("split GGUF with more parts than read: size unknown, not understated", async () => {
+  const { home, o } = machine();
+  const inst = join(home, "Strata");
+  install(inst, {});
+  const w = join(inst, "Huge-Q4_K_M-00001-of-00099.gguf");
+  writeFileSync(w, gguf([]));
+  writeFileSync(join(inst, "strata-huge.json"), JSON.stringify({ exe: "e", args: ["--native", w], model_name: "h" }));
+  o.env.STRATA_INSTALL_DIR = inst;
+  const [m] = (await discover(o)).models;
+  assert.equal(m?.sizeBytes, null);
+});
+
+test("parsers: commented-out --config lines, escaped quotes in ExecStart, --host/--port in args", async () => {
+  assert.equal(configFromScript("# exec x --config /old.json\nexec x --config /new.json\n", "/d"), "/new.json");
+  assert.deepEqual(splitExec(String.raw`/bin/x "a \"b\" c" d`), ["/bin/x", 'a "b" c', "d"]);
+  const { cardFor } = await import("./models.ts");
+  const card = await cardFor({ exe: "e", args: ["--port", "9001", "--host", "10.0.0.5"], port: 8080 });
+  assert.deepEqual([card.port, card.host], [9001, "10.0.0.5"]);
 });

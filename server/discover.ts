@@ -1,6 +1,7 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { type ModelCard, cardFor, readRunConfig } from "./models";
+import { createHash } from "node:crypto";
+import { type ModelCard, cardFor, readRunConfig, smallJson } from "./models";
 import { type Os, appInstallDir, appSettingsFile, settingsFile, systemdUserDir } from "./places";
 
 // Finds every Strata model on this machine, read-only:
@@ -18,7 +19,7 @@ export type Found = ModelCard & { id: string; config: string; launcher: Launcher
 export type Place = { path: string; source: string; models: number; note?: string };
 export type Discovery = { models: Found[]; places: Place[] };
 
-const readJson = async (p: string) => JSON.parse(await readFile(p, "utf8").catch(() => "{}"));
+const readJson = smallJson; // malformed settings mean "no installs listed", not "discovery failed"
 const isDir = async (p: string) => (await stat(p).catch(() => null))?.isDirectory() ?? false;
 const real = (p: string) => realpath(p).catch(() => resolve(p));
 const list = async (d: string) => (await readdir(d).catch(() => [] as string[])).sort();
@@ -49,7 +50,7 @@ export async function installPlaces(o: Os): Promise<{ path: string; source: stri
 export function splitExec(value: string): string[] {
   const out: string[] = [];
   const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  for (let m; (m = re.exec(value)); ) out.push(m[1] ?? m[2] ?? m[3]!);
+  for (let m; (m = re.exec(value)); ) out.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : (m[2] ?? m[3]!));
   if (out[0]) out[0] = out[0].replace(/^[-@:+!]+/, "");
   return out;
 }
@@ -64,6 +65,7 @@ export function configFromScript(text: string, scriptDir: string, env: Record<st
   const unq = (v: string) => v.trim().replace(/^"(.*)"$|^'(.*)'$/, "$1$2");
   const sub = (v: string) => v.replace(/\$\{(\w+)\}|\$(\w+)/g, (_, a, b) => vars[a ?? b] ?? env[a ?? b] ?? "");
   for (const line of text.split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue; // a commented-out --config is not the one used
     const assign = /^\s*(?:export\s+)?([A-Za-z_]\w*)=(.*)$/.exec(line);
     if (assign && !/--config\b/.test(line)) {
       vars[assign[1]!] = sub(unq(assign[2]!.replace(/\s+#.*$/, "")));
@@ -138,10 +140,13 @@ export async function discover(o: Os, opts: { extraFolders?: string[]; systemd?:
     if (byConfig.has(key)) return false;
     const rc = await readRunConfig(config);
     if (!rc) return false;
-    const card = await cardFor(rc);
+    const card = await cardFor(rc).catch(() => null); // one odd model must not hide the others
+    if (!card) return false;
     const chosen: Launcher | null = launcher ?? (firstInstall.path ? { kind: "strata", install: firstInstall.path } : null);
     if (!chosen) return false;
-    const id = chosen.kind === "systemd" ? `unit:${chosen.unit}` : `cfg:${slug(basename(config, ".json").replace(/^strata-/, ""))}`;
+    // Stable across rescans: the config's real path decides the id (and so the paseo-* profile it owns).
+    const tag = createHash("sha256").update(key).digest("hex").slice(0, 8);
+    const id = chosen.kind === "systemd" ? `unit:${chosen.unit}` : `cfg:${slug(basename(config, ".json").replace(/^strata-/, "")).slice(0, 40)}-${tag}`;
     let unique = id;
     for (let n = 2; [...byConfig.values()].some((f) => f.id === unique); n++) unique = `${id}-${n}`;
     byConfig.set(key, { ...card, id: unique, config, launcher: chosen, source });

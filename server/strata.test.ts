@@ -46,3 +46,53 @@ test("Strata's saved connections: URL + prefix, credential from the named env va
   (await import("node:fs")).rmSync(home, { recursive: true, force: true });
   assert.deepEqual(found, [{ url: "https://box.example/strata", key: "k" }]);
 });
+
+test("a saved connection's prefix must be a path: it cannot redirect the host", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { savedConnections } = await import("./strata.ts");
+  const home = mkdtempSync(join(tmpdir(), "strata-conn-"));
+  const dir = join(home, ".config/strata/connections");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "a.json"), JSON.stringify({ url: "https://box.example", prefix: "@evil.example", credential_env: "MISSING" }));
+  const found = await savedConnections({ windows: false, home, env: {} });
+  rmSync(home, { recursive: true, force: true });
+  assert.deepEqual(found, [{ url: "https://box.example", key: undefined }]);
+});
+
+test("credentials: $STRATA_API_KEY only after /health says Strata, never to saved connections; merging keeps keys", async () => {
+  const { createServer } = await import("node:http");
+  const { fetchMetrics, mergeEndpoints } = await import("./strata.ts");
+  const seen: Record<string, (string | undefined)[]> = { decoy: [], strata: [] };
+  const serve = (name: string, strata: boolean) =>
+    new Promise<{ url: string; close: () => void }>((ok) => {
+      const s = createServer((q, r) => {
+        seen[name]!.push(q.headers.authorization);
+        const body = !strata ? {} : q.url === "/health" ? { service: "strata", loaded: true } : sample;
+        r.end(JSON.stringify(body));
+      }).listen(0, "127.0.0.1", () => ok({ url: `http://127.0.0.1:${(s.address() as { port: number }).port}`, close: () => s.close() }));
+    });
+  const decoy = await serve("decoy", false), real = await serve("strata", true);
+  process.env.STRATA_API_KEY = "secret";
+  try {
+    await assert.rejects(fetchMetrics({ url: decoy.url, global: true }), /not a Strata server/);
+    assert.deepEqual(seen.decoy, [undefined]);
+    await fetchMetrics({ url: real.url, global: true });
+    assert.deepEqual(seen.strata, [undefined, "Bearer secret"]); // /health without, /metrics with
+    seen.strata = [];
+    await fetchMetrics({ url: real.url }); // a saved connection whose credential variable is unset
+    assert.deepEqual(seen.strata, [undefined, undefined]);
+  } finally {
+    delete process.env.STRATA_API_KEY;
+    decoy.close();
+    real.close();
+  }
+  assert.deepEqual(mergeEndpoints([{ url: "u", global: true }, { url: "u", key: "k" }]), [{ url: "u", key: "k", global: true }]);
+});
+
+test("Windows .cmd launcher: paths with spaces quoted; % ! and quotes refused rather than expanded", async () => {
+  const { cmdExeLine } = await import("./control.ts");
+  assert.equal(cmdExeLine("C:\\S A\\strata.cmd", ["runtime", "C:\\M (x)\\a&b.json"]), '""C:\\S A\\strata.cmd" "runtime" "C:\\M (x)\\a&b.json""');
+  for (const bad of ["C:\\%TEMP%\\x.json", "C:\\a!b", 'a"b']) assert.throws(() => cmdExeLine("s.cmd", [bad]), /safely/);
+});

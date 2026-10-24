@@ -2,7 +2,7 @@
 // machine that has never seen the author's setup. It builds a Strata-like layout in the OS's own places
 // (Strata settings file, an install elsewhere, GGUF files; on Linux also a user systemd template unit), with
 // the fake Strata CLI/server from fake-strata/. Prints PASS/FAIL per check; exit code = number of failures.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, cpSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -50,7 +50,7 @@ const cfg = (name: string, file: string, port: number) =>
   JSON.stringify({ exe: join(app, "engine", "strata"), args: ["--native", join(models, file)], model_name: name, port });
 writeFileSync(join(app, "strata-tiny.json"), cfg("tiny-model", "TinyFam-Q4_K_M.gguf", 18222));
 
-const bigId = linux ? "unit:myllm@big.service" : "cfg:big";
+let bigId = linux ? "unit:myllm@big.service" : "cfg:big";
 if (linux) {
   // A user's own template service whose script names its config through $HOME.
   const llm = join(home, "llm");
@@ -66,8 +66,13 @@ if (linux) {
 } else {
   writeFileSync(join(app, "strata-big.json"), cfg("big-model", "BigFam-IQ2_XXS-00001-of-00002.gguf", 18333));
 }
-// Something else listening locally that is not Strata.
-const decoy = createServer((_q, r) => r.end("{}")).listen(18444, "127.0.0.1");
+// Something else listening locally that is not Strata, on a port the analytics try: it must never get the key.
+process.env.STRATA_API_KEY = "e2e-secret";
+const decoyAuth: string[] = [];
+const decoy = createServer((q, r) => {
+  if (q.headers.authorization) decoyAuth.push(q.headers.authorization);
+  r.end("{}");
+}).listen(18444, "127.0.0.1");
 
 // ---------------------------------------------------------------- checks
 let failures = 0;
@@ -86,24 +91,27 @@ async function until(id: string, want: string, seconds: number) {
 }
 
 configure({ extraFolders: [], useSystemd: true });
-configureEndpoints({ knownPorts: async () => [] }); // analytics must find servers by scanning, not by config
+configureEndpoints({ knownPorts: async () => [18444] }); // models' own ports: found by scanning, not by config
 
 const { engines, places } = await listEngines(true);
-const ids = engines.map((e) => e.id).sort();
+const bare = (id: string) => id.replace(/-[0-9a-f]{8}$/, ""); // cfg ids end in a hash of the config's path
+const ids = engines.map((e) => bare(e.id)).sort();
 check(`discovers both models (${process.platform})`, JSON.stringify(ids) === JSON.stringify(["cfg:tiny", bigId].sort()), ids);
-const tiny = engines.find((e) => e.id === "cfg:tiny");
+const tinyId = engines.find((e) => bare(e.id) === "cfg:tiny")?.id ?? "cfg:tiny";
+if (!linux) bigId = engines.find((e) => bare(e.id) === "cfg:big")?.id ?? bigId;
+const tiny = engines.find((e) => e.id === tinyId);
 const big = engines.find((e) => e.id === bigId);
 check("GGUF metadata: provider, family, quant", tiny?.provider === "TestQuant" && tiny?.family === "TinyFam" && tiny?.quant === "Q4_K_M", tiny);
 check("split GGUF size summed", (big?.sizeBytes ?? 0) > 3_000_000, big?.sizeBytes);
 check("launchers", !!tiny?.launcher.startsWith("Strata runtime") && !!big?.launcher.startsWith(linux ? "systemd" : "Strata runtime"), [tiny?.launcher, big?.launcher]);
 check("Strata settings place searched", places.some((p) => p.source === "Strata settings" && p.models === (linux ? 1 : 2)), places);
-check("picker: smallest model's group first", groupEngines(engines)[0]?.engines[0]?.id === "cfg:tiny", groupEngines(engines).map((g) => g.title));
+check("picker: smallest model's group first", groupEngines(engines)[0]?.engines[0]?.id === tinyId, groupEngines(engines).map((g) => g.title));
 
 const before = await getSnapshot();
 check("no Strata server yet; the unrelated HTTP server is ignored", before.online === false, before);
 
-await loadEngine("cfg:tiny");
-check("Strata runtime load reaches ready", await until("cfg:tiny", "ready", 30), await state("cfg:tiny"));
+await loadEngine(tinyId);
+check("Strata runtime load reaches ready", await until(tinyId, "ready", 30), await state(tinyId));
 const ports = await strataListeners();
 check("listener scan finds the server on its non-default port", ports.includes(18222) && !ports.includes(18444), ports);
 await sleep(10_500); // the analytics rescan every 10 s
@@ -111,7 +119,7 @@ let snap = await getSnapshot();
 check("analytics read the running model", snap.online && snap.url === "http://127.0.0.1:18222" && snap.model === "tiny-model", snap);
 
 await loadEngine(bigId);
-check("switching stops the other model first", (await state("cfg:tiny")) === "stopped", await state("cfg:tiny"));
+check("switching stops the other model first", (await state(tinyId)) === "stopped", await state(tinyId));
 check("second model reaches ready", await until(bigId, "ready", 30), (await listEngines()).engines.find((e) => e.id === bigId));
 await sleep(10_500);
 snap = await getSnapshot();
@@ -122,10 +130,32 @@ check("stop reaches stopped", await until(bigId, "stopped", 30), await state(big
 await sleep(1000);
 check("no Strata listener left", (await strataListeners()).length === 0, await strataListeners());
 
-await loadEngine("cfg:tiny");
+await loadEngine(tinyId);
 await sleep(300);
-await stopEngine("cfg:tiny");
-check("abort during a load ends stopped", await until("cfg:tiny", "stopped", 30), await state("cfg:tiny"));
+await stopEngine(tinyId);
+check("abort during a load ends stopped", await until(tinyId, "stopped", 30), await state(tinyId));
+
+// Two clients press Load on different models at once: one model ends up running, the later request.
+await Promise.allSettled([loadEngine(tinyId), loadEngine(bigId)]);
+await until(bigId, "ready", 30);
+const both = (await listEngines()).engines.filter((e) => e.state !== "stopped").map((e) => [bare(e.id), e.state]);
+check("concurrent loads: exactly one model runs", both.length === 1 && both[0]![0] === bare(bigId), both);
+
+// Abort pressed while the Load is still stopping the previous model: the new model never starts.
+const pending = loadEngine(tinyId);
+await stopEngine(tinyId);
+await pending.catch(() => {});
+await sleep(3000);
+check("abort while the load is still preparing: nothing starts", (await until(bigId, "stopped", 30)) && (await state(tinyId)) === "stopped" && (await strataListeners()).length === 0,
+  [await state(tinyId), await state(bigId), await strataListeners()]);
+
+// A Strata server this plugin did not start (another profile, a terminal) holds the GPU: Load refuses.
+const stranger = spawn(process.execPath, [join(app, "serve", "server.py"), "--config", join(app, "strata-tiny.json"), "--port", "18555"], { stdio: "ignore" });
+await sleep(3000);
+const refused = await loadEngine(tinyId).then(() => "", (e) => String(e.message));
+check("load refuses while a foreign Strata server runs", /did not start/.test(refused) && (await state(tinyId)) === "stopped", refused);
+stranger.kill();
+check("the decoy on a probed port never received a credential", decoyAuth.length === 0, decoyAuth);
 
 decoy.close();
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILED`);
