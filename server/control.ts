@@ -245,7 +245,31 @@ const gen = (id: string) => generation.get(id) ?? 0;
 const stopErrors = new Map<string, string>();
 
 
+// A long tool run (autotune, update) owns the GPU and the engine files: no Load meanwhile.
+let busy: string | null = null;
+export const setBusy = (reason: string | null) => void (busy = reason);
+
+/** Stop every model that holds the GPU, through the same lock as Load/Stop; refuses if a foreign Strata server
+ * runs (it would hold the GPU too). For tools that need the whole GPU. */
+export function freeGpu(): Promise<void> {
+  return exclusive(async () => {
+    const { engines } = await listNow(false);
+    const foreign = await elsewhere(engines, true);
+    if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first`);
+    for (const e of engines.filter(owns)) {
+      generation.set(e.id, gen(e.id) + 1); // a queued Load must not start it again
+      await stopNow(await find(e.id));
+    }
+  }).finally(() => invalidateServers());
+}
+
+export { find as findModel };
+
+/** Strata's command-line tool for an install, with the environment it needs (a source checkout's .venv). */
+export const strataCommand = (install: string) => ({ cmd: cli(install), env: cliEnv(install) });
+
 export function loadEngine(id: string): Promise<void> {
+  if (busy) return Promise.reject(new Error(`${busy} is running; cancel it or wait for it to finish`));
   stopErrors.delete(id);
   const asked = gen(id);
   return exclusive(() => load(id, () => gen(id) !== asked)).finally(() => invalidateServers());

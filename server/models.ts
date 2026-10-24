@@ -12,6 +12,8 @@ export type ModelCard = {
   name: string;
   port: number;
   host: string | null;
+  /** The engine executable the run config starts (tells whether Strata's updates reach this model). */
+  engine: string;
   format: "gguf" | "exl3" | "other";
   quant: string;
   family: string;
@@ -190,5 +192,5 @@ export async function cardFor(config: RunConfig): Promise<ModelCard> {
   const [sizeBytes, meta] = await Promise.all([partial ? null : totalSize(files), describe(format, files, dir, name)]);
   const port = Number(flag(config.args, "--port") ?? config.port);
   const host = flag(config.args, "--host") ?? (typeof config.host === "string" ? config.host : null);
-  return { name, port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 8095, host, format, sizeBytes, weights: files, ...meta };
+  return { name, port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 8095, host, engine: config.exe, format, sizeBytes, weights: files, ...meta };
 }

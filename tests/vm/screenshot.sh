@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # README screenshots from a real Paseo daemon (the Paseo AppImage's own, run as Node) in a throwaway Incus VM:
-# the plugin installed from a `git archive` of HEAD (what a public install gets), a demo Strata machine
+# the plugin installed from the working tree's git-visible files (what a public install gets, no node_modules), a demo Strata machine
 # (tests/vm/demo.mjs) and the fake Strata CLI/server in demo mode. The daemon serves Paseo's web client; the
 # host's Brave (headless, puppeteer-core) opens it at phone and desktop sizes, presses Load and captures.
 # Usage: tests/vm/screenshot.sh [--keep]   (PASEO_APPIMAGE, BROWSER, DOTFILES_ROOT may override)
@@ -25,7 +25,9 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 
-git -C "$ROOT" archive --format=tar --prefix=plugin/ HEAD | tar -xf - -C "$OUT"
+# The working tree's tracked and new (not ignored) files: what the next commit would publish, no node_modules.
+mkdir -p "$OUT/plugin"
+(cd "$ROOT" && git ls-files -co --exclude-standard -z | xargs -0 tar -cf - --) | tar -xf - -C "$OUT/plugin"
 cp -r "$ROOT/tests/vm/fake-strata" "$ROOT/tests/vm/demo.mjs" "$OUT/"
 
 # Electron's binary links GTK/NSS even when it runs as Node.

@@ -60,4 +60,58 @@ if (a[0] === "runtime") {
     out({ ok: true, profile: name, state: "stopped" });
   }
 }
+// The maintenance tools, with the output shapes of strata bench/tune/update (strata_cli/bench.py,
+// tune_commands.py, update_cmd.py). Each takes a few seconds; Ctrl+C ends them the way Strata does.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let interrupted = false;
+process.on("SIGINT", () => (interrupted = true));
+if (a[0] === "bench" && a[1] === "run") {
+  const dir = arg("--out");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const phases = ["warmup", "serial", "mixed"];
+  const progress = (done, current, state = "running") => writeFileSync(join(dir, "progress.json"), JSON.stringify({
+    schema_version: 1, kind: "strata.serving.benchmark.progress", suite: "serving-smoke", state,
+    planned_phases: phases, completed_phases: done, current_phase: current }));
+  for (let i = 0; i < phases.length; i++) {
+    progress(i, phases[i]);
+    await sleep(1000);
+    if (interrupted) out({ ok: false, error: { code: 130, message: "benchmark cancelled" } }, 130);
+  }
+  progress(3, null, "report_saved");
+  writeFileSync(join(dir, "results.json"), "{}");
+  out({ ok: true, path: join(dir, "results.json"), summary: { suite: "serving-smoke", successful: true, phases: [
+    { kind: "warmup", client_workers: 1, output_tok_s: 10, p50_ttft_s: 0.5, p50_latency_s: 1, failed: 0 },
+    { kind: "serial", client_workers: 1, output_tok_s: 42.5, p50_ttft_s: 0.2, p50_latency_s: 2.1, failed: 0 },
+    { kind: "mixed", client_workers: 4, output_tok_s: 120.4, p50_ttft_s: 0.6, p50_latency_s: 3.3, failed: 0 }] } });
+}
+if (a[0] === "tune" && a[1] === "auto") {
+  const status = arg("--status-file");
+  const planned = 8;
+  for (let i = 0; i <= planned; i++) {
+    writeFileSync(status, JSON.stringify({ state: "running", stage: "round", message: `Round ${i} of ${planned}`, runs_done: i,
+      runs_planned: planned, minutes_left: Math.max(1, planned - i) }));
+    await sleep(600);
+    if (interrupted) {
+      const result = { outcome: "cancelled", message: "Stopped. Your settings were not changed.", preset: null };
+      writeFileSync(status, JSON.stringify({ state: "done", result }));
+      out({ ok: true, result }, 130);
+    }
+  }
+  const result = { outcome: "improved", message: "8% faster than your settings.", preset: { id: "p1", name: "fake 64K – Full speed" } };
+  writeFileSync(status, JSON.stringify({ state: "done", result }));
+  out({ ok: true, result });
+}
+if (a[0] === "update" && a.includes("--check")) {
+  out({ ok: true, engine: { installed: null, offered: { version: "9.9.9" }, status: "install", download_bytes: 5_000_000 },
+    control: { installed: "1.0", offered: "1.1", status: "available", download_bytes: 1_000_000 } });
+}
+if (a[0] === "update") {
+  for (let pct = 0; pct <= 100; pct += 25) {
+    process.stdout.write(JSON.stringify({ schema_version: 1, event: "progress", phase: "download", component: "engine", label: "engine 9.9.9", percent: pct, done: pct, total: 100 }) + "\n");
+    await sleep(400);
+  }
+  process.stdout.write(JSON.stringify({ schema_version: 1, event: "phase", phase: "test", message: "Test start of the new engine" }) + "\n");
+  await sleep(400);
+  out({ ok: true, exit_code: 0, results: [{ component: "engine", status: "updated", version: "9.9.9" }, { component: "control", status: "updated", version: "1.1" }] });
+}
 out({ ok: false, error: { code: 2, message: `unsupported: ${a.join(" ")}` } }, 2);

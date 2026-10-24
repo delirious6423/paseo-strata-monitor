@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { configure, listEngines, loadEngine, stopEngine } from "../../server/control";
 import { strataListeners } from "../../server/listeners";
 import { configureEndpoints, getSnapshot } from "../../server/strata";
+import { cancelJob, checkUpdate, startBench, startTune, startUpdate, toolsStatus } from "../../server/tools";
 import { groupEngines } from "../../shared/group";
 
 const win = process.platform === "win32";
@@ -156,6 +157,37 @@ const refused = await loadEngine(tinyId).then(() => "", (e) => String(e.message)
 check("load refuses while a foreign Strata server runs", /did not start/.test(refused) && (await state(tinyId)) === "stopped", refused);
 stranger.kill();
 check("the decoy on a probed port never received a credential", decoyAuth.length === 0, decoyAuth);
+
+// ---------------------------------------------------------------- tools: update check, benchmark, autotune, update
+const waitJob = async (seconds: number) => {
+  for (let i = 0; i < seconds * 2; i++) {
+    const st = await toolsStatus();
+    if (!st.job) return st.history[0] ?? null;
+    await sleep(500);
+  }
+  return null;
+};
+const u = await checkUpdate(true);
+check("update check: offered versions; the found models would not get the new engine", u.available && u.engine.offered === "9.9.9" && !u.reachesModels, u);
+await loadEngine(tinyId);
+await until(tinyId, "ready", 30);
+await startBench(tinyId);
+let job = await waitJob(30);
+check("benchmark of the running model", job?.kind === "bench" && job.state === "done" && job.details.some((d) => /42\.5 tok\/s/.test(d)), job);
+await startTune(tinyId, "quick");
+await until(tinyId, "stopped", 30); // Windows: stopping goes through cmd.exe and a PowerShell listener scan
+const blocked = await loadEngine(bigId).then(() => "", (e) => String(e.message));
+check("autotune stops the running model first and blocks Load", (await state(tinyId)) === "stopped" && /Autotune is running/.test(blocked), [await state(tinyId), blocked]);
+job = await waitJob(60);
+check("autotune result", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") && job.details.some((d) => /every start/.test(d)), job);
+await startTune(tinyId, "quick");
+await sleep(2000);
+await cancelJob();
+job = await waitJob(40);
+check("autotune cancel ends it, settings unchanged", job?.state === "cancelled" && /not changed/.test(job.outcome ?? "") && (await strataListeners()).length === 0, job);
+await startUpdate();
+job = await waitJob(40);
+check("update installs with progress", job?.kind === "update" && job.state === "done" && job.outcome === "Updated" && job.details.length === 2, job);
 
 decoy.close();
 console.log(failures === 0 ? "ALL PASS" : `${failures} FAILED`);

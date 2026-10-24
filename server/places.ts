@@ -35,5 +35,11 @@ export const systemdUserDir = (o: Os) => join(xdgConfig(o), "systemd", "user");
 /** The Strata command-line launcher inside an install. */
 export const cliIn = (install: string, o: Os) => join(install, "bin", o.windows ? "strata.cmd" : "strata");
 
+/** The plugin's own files (tool history, benchmark reports), outside Strata's folders. */
+export const pluginStateDir = (o: Os) =>
+  o.windows ? join(local(o), "paseo-strata")
+  : process.platform === "darwin" ? join(o.home, "Library", "Application Support", "paseo-strata")
+  : join(o.env.XDG_STATE_HOME || join(o.home, ".local", "state"), "paseo-strata");
+
 /** Strata's server default port, and the port setup writes into run configs. */
 export const DEFAULT_PORTS = [8095, 8080];

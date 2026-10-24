@@ -40,12 +40,29 @@ const screenUrl = page.url();
 console.log("screen:", screenUrl);
 await click("Load");
 await waitText(/Ready on port/, 90_000);
-console.log("loaded; analytics:", /tok\/s|Decode|Prefill/.test(await text()));
+await click("Benchmark");
+await waitText(/One request: [0-9.]+ tok\/s/, 60_000);
+console.log("benchmark result shown");
 
 await shot("screenshot.png", { width: 1280, height: 860, scale: 2 });
 await shot("screenshot-dark.png", { width: 1280, height: 860, scale: 2, dark: true });
 await shot("phone.png", { width: 390, height: 844, scale: 3, mobile: true });
 await shot("phone-dark.png", { width: 390, height: 844, scale: 3, mobile: true, dark: true });
+
+// The tools on a phone: scrolled to the Tools section, with the benchmark result and an update check.
+await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
+await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+await page.goto(screenUrl, { waitUntil: "networkidle2" });
+await waitText(/Check for updates/);
+await click("Check for updates");
+await waitText(/Update available|Up to date/);
+await page.evaluate(() => {
+  const el = [...document.querySelectorAll("div")].find((d) => /^Tools · /.test(d.innerText ?? "") && d.children.length === 0);
+  el?.scrollIntoView({ block: "start" });
+});
+await sleep(1500);
+await page.screenshot({ path: join(outDir, "phone-tools.png") });
+console.log("wrote phone-tools.png");
 
 // The Model discovery settings screen.
 await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);

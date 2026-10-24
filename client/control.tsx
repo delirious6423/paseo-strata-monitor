@@ -6,6 +6,7 @@ import { Pressable, Text, View } from "react-native";
 import { type Engine, strataEngines, strataLoad, strataStop } from "../shared/control";
 import { gb, groupEngines } from "../shared/group";
 import type { Styles } from "./monitor";
+import { Tools } from "./tools";
 
 const BUSY_MS = 1000;
 const IDLE_MS = 3000;
@@ -182,6 +183,7 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
         <Text style={{ color: danger ? c.surface0 : c.accentForeground, textAlign: "center", fontWeight: "600" }}>{label}</Text>
       </Pressable>
       {footer}
+      <Tools theme={theme} styles={styles} sel={sel} />
     </View>
   );
 }

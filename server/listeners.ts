@@ -55,7 +55,8 @@ export function parseLsof(text: string): Map<string, number[]> {
 }
 
 async function mac(): Promise<number[]> {
-  const byPid = parseLsof(await exec("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"]));
+  // lsof walks every open file; on a busy Mac it can take seconds (3 s missed servers in a loaded VM).
+  const byPid = parseLsof(await exec("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"], 8000));
   const ports: number[] = [];
   for (const [pid, p] of byPid) if (STRATA_SERVER.test(await exec("ps", ["-o", "command=", "-p", pid]))) ports.push(...p);
   return ports;

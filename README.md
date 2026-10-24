@@ -6,6 +6,11 @@ the Strata models on your machine, load or stop one with a click, and watch the 
 - **Model picker**: every Strata model found on the machine, grouped by quant provider (and by model family when
   there are several), smallest first. Load, Abort while loading, Stop; loading one model stops the other first. One load or stop runs at a time, even
   with several Paseo clients, and a Strata server the plugin did not start blocks Load until you stop it.
+- **Tools** for the selected model, through Strata's own command-line tool: **Benchmark** (Strata's quick
+  serving check of the running model: tok/s, time to first token, alone and 4 at once), **Autotune** (finds the
+  fastest settings for this PC, about 20 minutes, and saves them as a preset the server uses at every start; it
+  stops the running model first, and Cancel leaves your settings unchanged) and **Check for updates / Install
+  update** (engine and control from Strata's signed feed). One tool at a time; Load waits until it ends.
 - **Live status**: an always-visible sidebar row with prefill and decode tok/s, and a screen with a speed graph,
   queue, GPU/RAM use and recent requests.
 
@@ -43,6 +48,21 @@ are the weight files on disk (split GGUFs summed, linked files counted once).
   delete them there to undo. On Windows, paths containing `%`, `!` or `"` are refused rather than passed through
   `cmd.exe`, which would expand them.
 - A model counts as ready when its server's `/health` reports a Strata server with the model loaded.
+
+## How the tools run
+
+All three use the Strata command-line tool of the first Strata install that has one (else `strata` on PATH):
+
+- Benchmark: `strata bench run --url <the model's server> --suite serving-smoke --out <new folder>`; reports go to
+  the plugin's folder (`~/.local/state/paseo-strata/bench`, macOS `~/Library/Application Support/paseo-strata`,
+  Windows `%LOCALAPPDATA%\paseo-strata`).
+- Autotune: `strata tune auto <run config> --mode quick --status-file …`. Undo a saved preset with
+  `strata presets undo` or `strata presets off`.
+- Update: `strata update --check`, then `strata update --output jsonl --wait 0`. Strata switches to a new engine
+  only after a test start and keeps the previous one (`strata components rollback`). An update installs into
+  Strata's component folder; a run config that starts its own engine file is not changed, and the screen says so.
+
+Cancel sends Ctrl+C (Windows: ends the process tree). The last 20 results are kept in the plugin's folder.
 
 ## How it finds a running server (live status)
 
@@ -83,11 +103,11 @@ Cross-platform end-to-end checks in throwaway VMs: [TESTING.md](TESTING.md).
 
 ![The Strata screen in Paseo: model picker grouped by provider, a loaded model and its live speed](assets/screenshot.png)
 
-| Phone | Phone, dark | Model discovery settings |
-|---|---|---|
-| ![Strata screen on a phone](assets/phone.png) | ![Strata screen on a phone, dark theme](assets/phone-dark.png) | ![Model discovery settings](assets/settings.png) |
+| Phone | Phone, dark | Tools | Model discovery settings |
+|---|---|---|---|
+| ![Strata screen on a phone](assets/phone.png) | ![Strata screen on a phone, dark theme](assets/phone-dark.png) | ![Benchmark result and update check](assets/phone-tools.png) | ![Model discovery settings](assets/settings.png) |
 
 Screenshots: Paseo 0.12.0 in a throwaway VM with demo models (real names and sizes, empty weights) and a stand-in
-Strata server, so the speeds are made up; `tests/vm/screenshot.sh` recreates them.
+Strata server and CLI, so the speeds, benchmark and versions are made up; `tests/vm/screenshot.sh` recreates them.
 
 MIT licensed.
