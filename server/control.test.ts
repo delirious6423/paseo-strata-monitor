@@ -8,7 +8,8 @@ const root = mkdtempSync(join(tmpdir(), "strata-root-"));
 for (const f of ["run-iq3_s.sh", "run-iq3_xxs.sh", "run-bad name.sh", "run-x;rm.sh", "notes.txt"]) writeFileSync(join(root, f), "");
 writeFileSync(join(root, "strata-iq3_s.json"), JSON.stringify({ model_name: "qwen-iq3_s" }));
 process.env.STRATA_ROOT = root;
-const { discover, loadEngine, parseShow } = await import("./control.ts");
+process.env.STRATA_MODELS = join(root, "no-registry.json");
+const { discover, loadEngine, parseRegistry, parseShow } = await import("./control.ts");
 
 test("discovers one strata@ unit per safe run-<model>.sh", () => {
   const defs = discover().filter((d) => d.port === 8080);
@@ -29,4 +30,23 @@ test("parses systemctl show blocks", () => {
   );
   assert.deepEqual(units.get("strata@a.service"), { activeState: "active", result: "success", sinceMs: 1761300000000 });
   assert.deepEqual(units.get("strata@b.service"), { activeState: "failed", result: "exit-code", sinceMs: null });
+});
+
+test("registry keeps safe entries and skips malformed or unsafe ones", () => {
+  const defs = parseRegistry({
+    models: [
+      { id: "gyro-m", label: "Gyro-M", unit: "strata-model@gyro-m.service", port: 8080, note: "best" },
+      { id: "gyro-m", unit: "strata-model@dup.service", port: 8080 },
+      { id: "x", unit: "ssh.service", port: 8080 },
+      { id: "x;rm", unit: "strata@x.service", port: 8080 },
+      { id: "y", unit: "strata@y.service", port: "8080" },
+      null,
+      { id: "z", unit: "strata@z.service", port: 8093 },
+    ],
+  });
+  assert.deepEqual(defs, [
+    { id: "gyro-m", label: "Gyro-M", unit: "strata-model@gyro-m.service", port: 8080, note: "best" },
+    { id: "z", label: "z", unit: "strata@z.service", port: 8093, note: null },
+  ]);
+  assert.throws(() => parseRegistry({}), /no models list/);
 });

@@ -6,6 +6,7 @@ export const engineSchema = z.object({
   label: z.string(),
   unit: z.string(),
   port: z.number(),
+  note: z.string().nullable(),
   state: z.enum(["stopped", "loading", "ready", "stopping", "failed"]),
   sinceMs: z.number().nullable(),
   error: z.string().nullable(),

@@ -62,7 +62,7 @@ export function Controls({ theme, styles }: { theme: PluginTheme; styles: any })
   if (data.engines.length === 0) {
     return (
       <View style={styles.card}>
-        <Text style={styles.label}>No Strata engines found (no run-*.sh in STRATA_ROOT).</Text>
+        <Text style={styles.label}>No Strata models found (empty STRATA_MODELS registry and no run-*.sh in STRATA_ROOT).</Text>
       </View>
     );
   }
@@ -107,6 +107,7 @@ export function Controls({ theme, styles }: { theme: PluginTheme; styles: any })
           );
         })}
       </View>
+      {sel.note ? <Text style={styles.value}>{sel.note}</Text> : null}
       <Text style={styles.label}>
         {status(sel)}
         {other ? ` · ${other.label} is ${other.state}; loading this stops it` : ""}

@@ -4,14 +4,18 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Engine } from "../shared/control";
 
-// Engines are user systemd services: strata@<model> (one per run-<model>.sh, port 8080) and the
-// optional EXL3 service (port 8093). Only discovered units are ever started or stopped.
+// Engines are user systemd services. The model registry (STRATA_MODELS) lists them; without it, one
+// strata@<model> per run-<model>.sh (port 8080) plus the optional EXL3 service (port 8093).
+// Only listed units are ever started or stopped.
 const ROOT = process.env.STRATA_ROOT ?? "/mnt/data4tb/Strata-new";
+const REGISTRY = process.env.STRATA_MODELS ?? "/mnt/data4tb/Strata-data/models/models.json";
+const SAFE_ID = /^[A-Za-z0-9_.-]+$/;
+const SAFE_UNIT = /^strata[A-Za-z0-9@_.-]*\.service$/;
 const EXL3_UNIT = "strata-exl3-quality.service";
 const READY_TIMEOUT_MS = 1000;
 const STOP_TIMEOUT_MS = 75_000;
 
-type Def = Pick<Engine, "id" | "label" | "unit" | "port">;
+type Def = Pick<Engine, "id" | "label" | "unit" | "port" | "note">;
 
 function modelName(model: string): string {
   try {
@@ -21,18 +25,37 @@ function modelName(model: string): string {
   return model;
 }
 
+/** Registry entries with a safe id and unit; malformed entries are skipped. */
+export function parseRegistry(raw: unknown): Def[] {
+  const list = (raw as { models?: unknown })?.models;
+  if (!Array.isArray(list)) throw new Error("models.json has no models list");
+  const seen = new Set<string>();
+  return list.flatMap((m): Def[] => {
+    const { id, label, unit, port, note } = (m ?? {}) as Record<string, unknown>;
+    if (typeof id !== "string" || !SAFE_ID.test(id) || seen.has(id)) return [];
+    if (typeof unit !== "string" || !SAFE_UNIT.test(unit) || typeof port !== "number") return [];
+    seen.add(id);
+    return [{
+      id, unit, port,
+      label: typeof label === "string" ? label.slice(0, 60) : id,
+      note: typeof note === "string" ? note.slice(0, 120) : null,
+    }];
+  });
+}
+
 export function discover(): Def[] {
+  if (existsSync(REGISTRY)) return parseRegistry(JSON.parse(readFileSync(REGISTRY, "utf8")));
   let files: string[] = [];
   try {
     files = readdirSync(ROOT);
   } catch {}
   const defs: Def[] = files
-    .map((f) => /^run-([A-Za-z0-9_.-]+)\.sh$/.exec(f)?.[1])
-    .filter((m): m is string => !!m)
+    .map((f) => /^run-(.+)\.sh$/.exec(f)?.[1])
+    .filter((m): m is string => !!m && SAFE_ID.test(m))
     .sort()
-    .map((m) => ({ id: m, label: modelName(m), unit: `strata@${m}.service`, port: 8080 }));
+    .map((m) => ({ id: m, label: modelName(m), unit: `strata@${m}.service`, port: 8080, note: null }));
   if (existsSync(join(homedir(), ".config/systemd/user", EXL3_UNIT))) {
-    defs.push({ id: "exl3-quality", label: "EXL3 2.05-bit (quality)", unit: EXL3_UNIT, port: 8093 });
+    defs.push({ id: "exl3-quality", label: "EXL3 2.05-bit (quality)", unit: EXL3_UNIT, port: 8093, note: null });
   }
   return defs;
 }

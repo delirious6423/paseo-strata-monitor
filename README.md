@@ -16,9 +16,10 @@ Set in the daemon's environment (all optional):
 
 - `STRATA_URL`: comma-separated server URLs. Default `http://127.0.0.1:8080,http://127.0.0.1:8093`.
 - `STRATA_API_KEY`: bearer token, if your server requires one.
-- `STRATA_ROOT`: Strata checkout for engine control. Default `/mnt/data4tb/Strata-new`.
+- `STRATA_MODELS`: model registry for engine control. Default `/mnt/data4tb/Strata-data/models/models.json`.
+- `STRATA_ROOT`: Strata checkout used when there is no registry. Default `/mnt/data4tb/Strata-new`.
 
-Engine control drives user systemd services: one `strata@<model>` per `run-<model>.sh` in `STRATA_ROOT` (port 8080), plus `strata-exl3-quality.service` (port 8093) if its unit file exists. Load stops any other running engine first, because each needs the whole GPU. Abort/Stop runs `systemctl --user stop`. Only discovered units are ever touched.
+Engine control drives user systemd services. The registry is `{"models": [{"id", "label", "unit", "port", "note"}]}`; units must be named `strata*.service`. Without a registry: one `strata@<model>` per `run-<model>.sh` in `STRATA_ROOT` (port 8080), plus `strata-exl3-quality.service` (port 8093) if its unit file exists. Load stops any other running engine first, because each needs the whole GPU. Abort/Stop runs `systemctl --user stop`. Only discovered units are ever touched.
 
 The daemon reads `GET /metrics` once per poll (1 s while generating, 3 s otherwise, only while the app shows the plugin) and shares the result between clients.
 
