@@ -79,3 +79,10 @@ export async function strataListeners(): Promise<number[]> {
   const ports = process.platform === "linux" ? await linux() : process.platform === "darwin" ? await mac() : process.platform === "win32" ? await windows() : [];
   return [...new Set(ports)].filter((p) => p > 0 && p < 65536).sort((a, b) => a - b);
 }
+
+/** strataListeners, shared by the analytics and the engine listing: a scan younger than `maxAgeMs` is reused. */
+let last: { at: number; ports: Promise<number[]> } | null = null;
+export function recentListeners(maxAgeMs: number): Promise<number[]> {
+  if (!last || Date.now() - last.at > maxAgeMs) last = { at: Date.now(), ports: strataListeners().catch(() => []) };
+  return last.ports;
+}

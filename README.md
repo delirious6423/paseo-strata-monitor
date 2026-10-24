@@ -53,6 +53,16 @@ found run configs; Strata's saved monitor connections (`strata_cli` connections 
 Between scans it polls one server: every second while it generates, every 3 seconds otherwise, while a Paseo window
 shows the sidebar row or the Strata screen.
 
+## Limits
+
+- "A Strata server the plugin did not start" means a local listener owned by a Strata server process
+  (`serve/server.py`) whose `/health` answers. One that is still loading, or listening only on a LAN address,
+  is not seen, so Load is not blocked by it.
+- `/health` saying `service: "strata"` identifies a Strata server; it does not authenticate one. Keys only go
+  to this machine, URLs you added, and saved connections' own credentials, so set those deliberately.
+- On a very slow Windows machine PowerShell's first start can exceed the 8 s listener scan; that scan then finds
+  nothing, and the next one (10 s later) catches up.
+
 ## Privacy
 
 The plugin reads local files listed above and talks only to Strata servers: loopback ports on this machine,

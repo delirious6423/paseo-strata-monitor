@@ -118,3 +118,50 @@ test("/health: ready only when it says loaded: true", async () => {
   s.close();
   assert.deepEqual(got, [{ loaded: false }, { loaded: false }, { loaded: true }, null]);
 });
+
+test("polling: a stop rescans once, a start scans every poll until its port answers, even with another server online", async () => {
+  const { createServer } = await import("node:http");
+  const { configureEndpoints, expectServer, getSnapshot, invalidateServers } = await import("./strata.ts");
+  // A decoy on a probed port counts full scans (each scan asks every candidate's /health).
+  let scans = 0;
+  const decoy = createServer((q, r) => { if (q.url === "/health") scans++; r.end("{}"); }).listen(0, "127.0.0.1");
+  // Two Strata servers that can be switched on and off: A (already running), B (the model being started).
+  const up = { a: false, b: false };
+  const strata = (k: "a" | "b") => createServer((q, r) => {
+    if (!up[k]) { r.statusCode = 503; r.end("{}"); return; }
+    r.end(JSON.stringify(q.url === "/health" ? { service: "strata", loaded: true } : sample));
+  }).listen(0, "127.0.0.1");
+  const servers = [decoy, strata("a"), strata("b")];
+  await Promise.all(servers.map((s) => new Promise((r) => s.listening ? r(null) : s.once("listening", r))));
+  const [d, a, b] = servers.map((s) => (s.address() as { port: number }).port) as [number, number, number];
+  configureEndpoints({ extraUrls: [], knownPorts: async () => [d, a, b] });
+  const poll = async () => { await new Promise((r) => setTimeout(r, 450)); return getSnapshot(); };
+  try {
+    await poll();
+    await poll();
+    assert.equal(scans, 1, "offline: one scan per 10 s");
+    invalidateServers();
+    await poll();
+    await poll();
+    await poll();
+    assert.equal(scans, 2, "a stop or failed load: exactly one extra scan, not minutes of them");
+
+    up.a = true; // another server is online and becomes the polled one
+    invalidateServers();
+    assert.equal((await poll()).online, true);
+    const before = scans;
+    expectServer(b);
+    await poll();
+    await poll();
+    assert.equal(scans, before + 2, "starting: every poll scans although A answers");
+    up.b = true;
+    await poll(); // finds B
+    const found = scans;
+    await poll();
+    await poll();
+    assert.equal(scans, found, "B answered: back to polling one server");
+  } finally {
+    servers.forEach((s) => s.close());
+    configureEndpoints({ knownPorts: async () => [] });
+  }
+});

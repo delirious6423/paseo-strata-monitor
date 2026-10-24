@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Snapshot } from "../shared/strata";
-import { strataListeners } from "./listeners";
+import { recentListeners } from "./listeners";
 import { DEFAULT_PORTS, type Os, connectionDir, here } from "./places";
 
 // Where the analytics read from: every Strata server this machine can see, found again every 10 s from
@@ -51,7 +51,7 @@ export async function savedConnections(o: Os): Promise<Endpoint[]> {
 export async function candidates(): Promise<Endpoint[]> {
   const list: Endpoint[] = [
     ...extraUrls.filter((u) => /^https?:\/\//.test(u)).map((u) => ({ url: root(u), global: true })),
-    ...(await strataListeners().catch(() => [])).map(local),
+    ...(await recentListeners(1000)).map(local),
     ...(await portsOf().catch(() => [])).map(local),
     ...(await savedConnections(os)),
     ...DEFAULT_PORTS.map(local),
@@ -175,31 +175,35 @@ async function scan(): Promise<Snapshot> {
 }
 
 let lastOffline: Snapshot | null = null;
-let expectUntil = 0;
+let expected: { port: number; until: number } | null = null;
+const expecting = () => !!expected && Date.now() < expected.until;
 
-/** A model is starting or stopping: scan on every poll for a while, so the screen follows within one poll. */
-export function expectServer(ms = 5 * 60_000) {
-  expectUntil = Date.now() + ms;
+/** Something changed (a stop, a failed load): the next poll scans once, then the usual 10 s pace. */
+export function invalidateServers() {
   servers = { ...servers, at: 0 };
   lastOffline = null;
 }
 
-/** The Strata servers the last scan found (no new scan). */
-export const recentServers = () => servers.list;
+/** A model was started on `port`: scan on every poll until a Strata server answers there (at most `ms`),
+ * even while another server is online, so the screen follows within one poll. */
+export function expectServer(port: number, ms = 5 * 60_000) {
+  expected = { port, until: Date.now() + ms };
+  invalidateServers();
+}
 
 async function probe(): Promise<Snapshot> {
   // Steady state: one request to the last working server; a full scan every 10 s or when it stops answering.
   // With nothing running, the scan (a process listing: PowerShell/lsof on Windows/macOS) also waits 10 s.
   const recent = Date.now() - servers.at < ENDPOINTS_MS;
-  if (lastGood && recent) {
+  if (lastGood && recent && !expecting()) {
     try {
       return { ...(await fetchMetrics(lastGood, true)), servers: servers.list };
     } catch {}
   }
-  if (!lastGood && recent && lastOffline && Date.now() > expectUntil) return lastOffline;
+  if (!lastGood && recent && lastOffline && !expecting()) return lastOffline;
   const snap = await scan();
   lastOffline = snap.online ? null : snap;
-  if (snap.online) expectUntil = 0;
+  if (expected && servers.list.some((s) => new URL(s.url).port === String(expected!.port))) expected = null;
   return snap;
 }
 

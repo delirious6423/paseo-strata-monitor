@@ -12,7 +12,8 @@ servers, checked headers, also on steady-state polls and when a saved connection
 ready only with `loaded: true`; Windows `.cmd` lines refuse `%`/`!`/quotes; EXL3 bits read from the head of a
 `quantization_config.json` larger than the read limit. `server/control.test.ts` (Linux) drives load/stop against a
 fake `systemctl` that is slow on `reset-failed`: an Abort in that window, or one Stop after several Loads, never
-lets the model start.
+lets the model start. A polling test counts full scans with a decoy: a stop or failed load rescans once (not
+for minutes); a started model is scanned for on every poll, even while another server answers, until its port does.
 
 ## End-to-end in throwaway VMs
 
@@ -33,7 +34,7 @@ existing run and discards its own VM afterwards.
 | Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 20/20 |
 | Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 20/20 |
 | Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 20/20 |
-| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 20/20 (2 of 3 runs; one run: first listener scan empty, see below) |
+| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 20/20 (3 of 4 runs; one run: first listener scan empty, see below) |
 | macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 20/20 |
 
 Known flake: on the emulated Windows ARM64 VM, PowerShell's first start can exceed the listener scan's 8 s

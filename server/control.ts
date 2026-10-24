@@ -3,9 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Engine } from "../shared/control";
 import { type Discovery, type Found, discover } from "./discover";
-import { strataListeners } from "./listeners";
+import { recentListeners } from "./listeners";
 import { type Os, cliIn, here, profileDir } from "./places";
-import { expectServer, recentServers, strataHealth } from "./strata";
+import { expectServer, invalidateServers, strataHealth } from "./strata";
 
 // Start/stop through what already owns a model: its systemd user unit (Linux), else Strata's own
 // `profile` + `runtime` commands (all platforms), using plugin-owned profiles named `paseo-<model>`.
@@ -161,16 +161,14 @@ const launcherLabel = (f: Found) => (f.launcher.kind === "systemd" ? `systemd ${
 /** A model that holds (or is taking/releasing) its port and the GPU. Failed and stopped ones do not. */
 const owns = (e: Engine) => e.state !== "stopped" && e.state !== "failed";
 
-/** Strata servers on this machine that no active model accounts for, from the analytics' last scan,
- * each confirmed alive now (a server just stopped by the plugin drops out instead of lingering). */
-async function elsewhere(engines: Engine[]): Promise<{ url: string; model: string | null }[]> {
+/** Strata servers on this machine that no active model accounts for: local listeners owned by a Strata server
+ * process, each confirmed by /health. The screen's warning and Load's refusal both use this one rule; the
+ * listing reuses a scan for 10 s (a process listing is PowerShell/lsof on Windows/macOS), Load scans fresh. */
+async function elsewhere(engines: Engine[], fresh = false): Promise<{ url: string; model: string | null }[]> {
   const ours = new Set(engines.filter(owns).map((e) => e.port));
-  const local = recentServers().filter((s) => {
-    const port = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)$/.exec(s.url)?.[1];
-    return port && !ours.has(Number(port));
-  });
-  const alive = await Promise.all(local.map(async (s) => !!(await strataHealth(s.url, PROBE_MS))));
-  return local.filter((_, i) => alive[i]);
+  const urls = (await recentListeners(fresh ? 0 : 10_000)).filter((p) => !ours.has(p)).map((p) => `http://127.0.0.1:${p}`);
+  const health = await Promise.all(urls.map((u) => strataHealth(u, PROBE_MS)));
+  return urls.flatMap((url, i) => (health[i] ? [{ url, model: null }] : []));
 }
 
 // Several clients poll every 1-3 s; one listing serves them all for a moment (Strata's CLI is a Python start).
@@ -246,24 +244,19 @@ const generation = new Map<string, number>();
 const gen = (id: string) => generation.get(id) ?? 0;
 const stopErrors = new Map<string, string>();
 
-/** Ports of Strata servers on this machine that no discovered, active model accounts for. */
-async function foreignServers(active: Engine[]): Promise<number[]> {
-  const ours = new Set(active.map((e) => e.port));
-  return (await strataListeners().catch(() => [] as number[])).filter((p) => !ours.has(p));
-}
 
 export function loadEngine(id: string): Promise<void> {
   stopErrors.delete(id);
   const asked = gen(id);
-  return exclusive(() => load(id, () => gen(id) !== asked)).finally(() => expectServer());
+  return exclusive(() => load(id, () => gen(id) !== asked)).finally(() => invalidateServers());
 }
 
 async function load(id: string, aborted: () => boolean): Promise<void> {
   const f = await find(id);
   const { engines } = await listNow(false); // fresh, not the shared cache
   const active = engines.filter(owns);
-  const foreign = await foreignServers(active);
-  if (foreign.length) throw new Error(`A Strata server this plugin did not start is running on port ${foreign.join(", ")}; stop it first (one model at a time)`);
+  const foreign = await elsewhere(engines, true);
+  if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first (one model at a time)`);
   // Blocking: the next model's port and GPU need the old one fully gone. A failed stop aborts the load.
   for (const o of active.filter((e) => e.id !== id)) await stopNow(await find(o.id));
   if (active.some((e) => e.id === id) || aborted()) return;
@@ -271,12 +264,14 @@ async function load(id: string, aborted: () => boolean): Promise<void> {
     await run("systemctl", ["--user", "reset-failed", "--", f.launcher.unit]).catch(() => {});
     if (aborted()) return;
     await run("systemctl", ["--user", "start", "--no-block", "--", f.launcher.unit]);
+    expectServer(f.port);
     return;
   }
   const name = await ensureProfile(f as Found & { launcher: { kind: "strata" } });
   if (aborted()) return;
   const r = json(await strata(f.launcher.install, ["runtime", "start", "--profile", name, "--wait", "0", "--output", "json"], 60_000));
   if (!r.ok) throw new Error(`Strata runtime start failed: ${r.error?.message ?? r.error ?? r.state ?? "unknown error"}`);
+  expectServer(f.port);
 }
 
 export async function stopEngine(id: string): Promise<void> {
@@ -296,7 +291,7 @@ export async function stopEngine(id: string): Promise<void> {
     .catch((e) => stopErrors.set(id, String(e.message ?? e).slice(0, 300)))
     .finally(() => {
       stopping.delete(id);
-      expectServer();
+      invalidateServers();
     });
 }
 
