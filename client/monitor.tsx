@@ -1,7 +1,8 @@
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import type { Snapshot } from "../shared/strata";
+import { Controls } from "./control";
 import { useStrata } from "./snapshot";
 
 const HISTORY = 60;
@@ -48,22 +49,25 @@ export function Monitor({ theme, layout }: PluginScreenProps) {
     [c, pad, layout.compact],
   );
 
+  const controls = <Controls theme={theme} styles={styles} />;
   if (!data) {
     return (
-      <View style={[styles.screen, styles.body]}>
+      <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
+        {controls}
         <Text style={styles.label}>{error ? `Error: ${error.message}` : "Connecting…"}</Text>
-      </View>
+      </ScrollView>
     );
   }
   if (!data.online) {
     return (
-      <View style={[styles.screen, styles.body]}>
-        <Text style={styles.title}>Strata is offline</Text>
+      <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
+        {controls}
+        <Text style={styles.title}>Strata server is offline</Text>
         <Text style={styles.label}>{data.error}</Text>
-      </View>
+      </ScrollView>
     );
   }
-  return <Online data={data} history={history} styles={styles} colors={c} />;
+  return <Online data={data} history={history} styles={styles} colors={c} controls={controls} />;
 }
 
 function Stat({ styles, label, value }: { styles: any; label: string; value: string }) {
@@ -75,11 +79,14 @@ function Stat({ styles, label, value }: { styles: any; label: string; value: str
   );
 }
 
-function Online({ data, history, styles, colors }: { data: Snapshot; history: number[]; styles: any; colors: any }) {
+function Online({
+  data, history, styles, colors, controls,
+}: { data: Snapshot; history: number[]; styles: any; colors: any; controls: ReactNode }) {
   const peak = Math.max(10, ...history);
   const busy = data.state === "generating";
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
+      {controls}
       <View style={styles.card}>
         <Text style={styles.title}>{data.model ?? "Strata"}</Text>
         <Text style={styles.label}>
