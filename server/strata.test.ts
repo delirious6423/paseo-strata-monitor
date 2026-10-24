@@ -44,7 +44,7 @@ test("Strata's saved connections: URL + prefix, credential from the named env va
   writeFileSync(join(dir, "bad.json"), JSON.stringify({ url: "file:///etc/passwd" }));
   const found = await savedConnections({ windows: false, home, env: { BOX_KEY: "k" } });
   (await import("node:fs")).rmSync(home, { recursive: true, force: true });
-  assert.deepEqual(found, [{ url: "https://box.example/strata", key: "k" }]);
+  assert.deepEqual(found, [{ url: "https://box.example/strata", key: "k", saved: true }]);
 });
 
 test("a saved connection's prefix must be a path: it cannot redirect the host", async () => {
@@ -58,7 +58,7 @@ test("a saved connection's prefix must be a path: it cannot redirect the host", 
   writeFileSync(join(dir, "a.json"), JSON.stringify({ url: "https://box.example", prefix: "@evil.example", credential_env: "MISSING" }));
   const found = await savedConnections({ windows: false, home, env: {} });
   rmSync(home, { recursive: true, force: true });
-  assert.deepEqual(found, [{ url: "https://box.example", key: undefined }]);
+  assert.deepEqual(found, [{ url: "https://box.example", key: undefined, saved: true }]);
 });
 
 test("credentials: $STRATA_API_KEY only after /health says Strata, never to saved connections; merging keeps keys", async () => {
@@ -83,16 +83,38 @@ test("credentials: $STRATA_API_KEY only after /health says Strata, never to save
     seen.strata = [];
     await fetchMetrics({ url: real.url }); // a saved connection whose credential variable is unset
     assert.deepEqual(seen.strata, [undefined, undefined]);
+    // Steady-state polling (verified on the last scan) still checks /health before sending a key: the port
+    // may now belong to something else.
+    seen.decoy = [];
+    await assert.rejects(fetchMetrics({ url: decoy.url, global: true }, true), /not a Strata server/);
+    assert.deepEqual(seen.decoy, [undefined]);
   } finally {
     delete process.env.STRATA_API_KEY;
     decoy.close();
     real.close();
   }
   assert.deepEqual(mergeEndpoints([{ url: "u", global: true }, { url: "u", key: "k" }]), [{ url: "u", key: "k", global: true }]);
+  // A saved connection's policy wins: its key, or none even where the same URL is also a local port.
+  assert.deepEqual(mergeEndpoints([{ url: "u", global: true }, { url: "u", saved: true }]), [{ url: "u", saved: true }]);
+  assert.deepEqual(mergeEndpoints([{ url: "u", saved: true, key: "s" }, { url: "u", global: true }]), [{ url: "u", saved: true, key: "s" }]);
 });
 
 test("Windows .cmd launcher: paths with spaces quoted; % ! and quotes refused rather than expanded", async () => {
   const { cmdExeLine } = await import("./control.ts");
   assert.equal(cmdExeLine("C:\\S A\\strata.cmd", ["runtime", "C:\\M (x)\\a&b.json"]), '""C:\\S A\\strata.cmd" "runtime" "C:\\M (x)\\a&b.json""');
   for (const bad of ["C:\\%TEMP%\\x.json", "C:\\a!b", 'a"b']) assert.throws(() => cmdExeLine("s.cmd", [bad]), /safely/);
+});
+
+test("/health: ready only when it says loaded: true", async () => {
+  const { createServer } = await import("node:http");
+  const { strataHealth } = await import("./strata.ts");
+  const bodies = [{ service: "strata" }, { service: "strata", loaded: "yes" }, { service: "strata", loaded: true }, { loaded: true }];
+  let i = 0;
+  const s = createServer((_q, r) => r.end(JSON.stringify(bodies[i]))).listen(0, "127.0.0.1");
+  await new Promise((r) => s.once("listening", r));
+  const url = `http://127.0.0.1:${(s.address() as { port: number }).port}`;
+  const got = [];
+  for (i = 0; i < bodies.length; i++) got.push(await strataHealth(url));
+  s.close();
+  assert.deepEqual(got, [{ loaded: false }, { loaded: false }, { loaded: true }, null]);
 });

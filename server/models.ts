@@ -1,4 +1,4 @@
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { readGgufMeta } from "./gguf";
 
@@ -38,6 +38,25 @@ const flag = (args: string[], f: string) => {
 };
 
 const MAX_PARTS = 64;
+
+/** EXL3's quantization_config.json runs to ~100 MB of per-tensor data; its scalar `bits`/`head_bits` come
+ * first, so read only the head of the file. */
+export async function exl3Bits(path: string): Promise<{ bits?: number; head_bits?: number }> {
+  const fh = await open(path, "r").catch(() => null);
+  if (!fh) return {};
+  try {
+    const buf = Buffer.alloc(64 << 10);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const head = buf.toString("utf8", 0, bytesRead);
+    const num = (k: string) => {
+      const v = Number(new RegExp(`"${k}"\\s*:\\s*([0-9.]+)`).exec(head)?.[1]);
+      return Number.isFinite(v) && v > 0 && v < 64 ? v : undefined;
+    };
+    return { bits: num("bits"), head_bits: num("head_bits") };
+  } finally {
+    await fh.close();
+  }
+}
 
 /** A small JSON object from disk, or {} when missing, too big, malformed or not an object. */
 export async function smallJson(path: string): Promise<Record<string, any>> {
@@ -149,12 +168,12 @@ async function describe(format: ModelCard["format"], files: string[], dir: strin
       provider: text(g.quantized_by) || hf?.[0] || repoOrg(text(g.repo_url)) || text(g.organization) || "Unknown provider",
     };
   } else if (format === "exl3" && dir) {
-    const q = (await smallJson(join(dir, "quantization_config.json"))) as Record<string, unknown>;
+    const q = await exl3Bits(join(dir, "quantization_config.json"));
     const readme = join(dir, "README.md");
     const card = frontMatter(((await stat(readme).catch(() => null))?.size ?? Infinity) < 1 << 20 ? await readFile(readme, "utf8").catch(() => "") : "");
-    const bits = typeof q.bits === "number" ? `${q.bits} bpw` : "EXL3";
+    const bits = typeof q.bits === "number" ? ` ${q.bits} bpw` : "";
     meta = {
-      quant: `EXL3 ${bits}${typeof q.head_bits === "number" ? ` h${q.head_bits}` : ""}`,
+      quant: `EXL3${bits}${typeof q.head_bits === "number" ? ` h${q.head_bits}` : ""}`,
       family: familyOf(card.base_model?.split("/").pop(), hf && stripTail(hf[1]), stripTail(basename(dir))),
       provider: card.quantized_by || hf?.[0] || "Unknown provider",
     };

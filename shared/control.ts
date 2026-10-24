@@ -39,7 +39,12 @@ export const placeSchema = z.object({ path: z.string(), source: z.string(), mode
 export const strataEngines = defineRpc({
   name: "strata.engines",
   input: z.object({ rescan: z.boolean().optional() }),
-  output: z.object({ engines: z.array(engineSchema), places: z.array(placeSchema) }),
+  output: z.object({
+    engines: z.array(engineSchema),
+    places: z.array(placeSchema),
+    /** Strata servers on this machine that no listed model accounts for; Load is refused while any runs. */
+    elsewhere: z.array(z.object({ url: z.string(), model: z.string().nullable() })),
+  }),
 });
 
 // Load stops any other running Strata model first: each needs the whole GPU.

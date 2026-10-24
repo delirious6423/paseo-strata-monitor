@@ -5,7 +5,7 @@ import type { Engine } from "../shared/control";
 import { type Discovery, type Found, discover } from "./discover";
 import { strataListeners } from "./listeners";
 import { type Os, cliIn, here, profileDir } from "./places";
-import { strataHealth } from "./strata";
+import { expectServer, recentServers, strataHealth } from "./strata";
 
 // Start/stop through what already owns a model: its systemd user unit (Linux), else Strata's own
 // `profile` + `runtime` commands (all platforms), using plugin-owned profiles named `paseo-<model>`.
@@ -158,10 +158,25 @@ const answers = async (f: Found) => {
 
 const launcherLabel = (f: Found) => (f.launcher.kind === "systemd" ? `systemd ${f.launcher.unit}` : `Strata runtime (${profileName(f)})`);
 
+/** A model that holds (or is taking/releasing) its port and the GPU. Failed and stopped ones do not. */
+const owns = (e: Engine) => e.state !== "stopped" && e.state !== "failed";
+
+/** Strata servers on this machine that no active model accounts for, from the analytics' last scan,
+ * each confirmed alive now (a server just stopped by the plugin drops out instead of lingering). */
+async function elsewhere(engines: Engine[]): Promise<{ url: string; model: string | null }[]> {
+  const ours = new Set(engines.filter(owns).map((e) => e.port));
+  const local = recentServers().filter((s) => {
+    const port = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)$/.exec(s.url)?.[1];
+    return port && !ours.has(Number(port));
+  });
+  const alive = await Promise.all(local.map(async (s) => !!(await strataHealth(s.url, PROBE_MS))));
+  return local.filter((_, i) => alive[i]);
+}
+
 // Several clients poll every 1-3 s; one listing serves them all for a moment (Strata's CLI is a Python start).
 const LIST_MS = 1500;
 let listing: { at: number; value: Promise<Listing> } | null = null;
-type Listing = { engines: Engine[]; places: Discovery["places"] };
+type Listing = { engines: Engine[]; places: Discovery["places"]; elsewhere: { url: string; model: string | null }[] };
 export function listEngines(rescan = false): Promise<Listing> {
   if (!rescan && listing && Date.now() - listing.at < LIST_MS) return listing.value;
   const value = listNow(rescan);
@@ -200,7 +215,7 @@ async function listNow(rescan: boolean): Promise<Listing> {
       };
     }),
   );
-  return { engines, places: d.places };
+  return { engines, places: d.places, elsewhere: await elsewhere(engines) };
 }
 
 async function find(id: string): Promise<Found> {
@@ -225,7 +240,10 @@ const exclusive = <T>(task: () => Promise<T>): Promise<T> => {
   queue = next.catch(() => {});
   return next;
 };
-const cancelled = new Set<string>();
+// Every Stop bumps its model's generation; a Load only starts if no Stop came after it was requested
+// (checked again right before each start step), so an Abort always wins, however the steps interleave.
+const generation = new Map<string, number>();
+const gen = (id: string) => generation.get(id) ?? 0;
 const stopErrors = new Map<string, string>();
 
 /** Ports of Strata servers on this machine that no discovered, active model accounts for. */
@@ -235,51 +253,50 @@ async function foreignServers(active: Engine[]): Promise<number[]> {
 }
 
 export function loadEngine(id: string): Promise<void> {
-  cancelled.delete(id);
   stopErrors.delete(id);
-  return exclusive(() => load(id));
+  const asked = gen(id);
+  return exclusive(() => load(id, () => gen(id) !== asked)).finally(() => expectServer());
 }
 
-async function load(id: string): Promise<void> {
+async function load(id: string, aborted: () => boolean): Promise<void> {
   const f = await find(id);
   const { engines } = await listNow(false); // fresh, not the shared cache
-  const active = engines.filter((e) => e.state !== "stopped" && e.state !== "failed");
+  const active = engines.filter(owns);
   const foreign = await foreignServers(active);
   if (foreign.length) throw new Error(`A Strata server this plugin did not start is running on port ${foreign.join(", ")}; stop it first (one model at a time)`);
   // Blocking: the next model's port and GPU need the old one fully gone. A failed stop aborts the load.
   for (const o of active.filter((e) => e.id !== id)) await stopNow(await find(o.id));
-  if (active.some((e) => e.id === id)) return;
-  if (cancelled.delete(id)) return;
+  if (active.some((e) => e.id === id) || aborted()) return;
   if (f.launcher.kind === "systemd") {
     await run("systemctl", ["--user", "reset-failed", "--", f.launcher.unit]).catch(() => {});
+    if (aborted()) return;
     await run("systemctl", ["--user", "start", "--no-block", "--", f.launcher.unit]);
     return;
   }
   const name = await ensureProfile(f as Found & { launcher: { kind: "strata" } });
-  if (cancelled.delete(id)) return;
+  if (aborted()) return;
   const r = json(await strata(f.launcher.install, ["runtime", "start", "--profile", name, "--wait", "0", "--output", "json"], 60_000));
   if (!r.ok) throw new Error(`Strata runtime start failed: ${r.error?.message ?? r.error ?? r.state ?? "unknown error"}`);
 }
 
 export async function stopEngine(id: string): Promise<void> {
-  cancelled.add(id); // a queued or preparing Load of this model will not start it
+  generation.set(id, gen(id) + 1); // every Load requested before now will not start this model
   stopErrors.delete(id);
   const f = await find(id);
-  if (f.launcher.kind === "systemd") {
-    const unit = f.launcher.unit;
-    await run("systemctl", ["--user", "stop", "--no-block", "--", unit]);
-    // Aborting during ExecStartPre marks the unit failed (result 'signal'); a user abort is not a failure.
-    void run("systemctl", ["--user", "stop", "--", unit], STOP_TIMEOUT_MS)
-      .then(() => run("systemctl", ["--user", "reset-failed", "--", unit]))
-      .catch(() => {});
-    return;
-  }
   stopping.add(id);
-  void exclusive(() => stopNow(f))
+  if (f.launcher.kind === "systemd") {
+    // Immediate (kills a start in progress); the queued blocking stop below also catches a start that slipped in.
+    await run("systemctl", ["--user", "stop", "--no-block", "--", f.launcher.unit]).catch(() => {});
+  }
+  void exclusive(async () => {
+    await stopNow(f);
+    // Aborting during ExecStartPre marks the unit failed (result 'signal'); a user abort is not a failure.
+    if (f.launcher.kind === "systemd") await run("systemctl", ["--user", "reset-failed", "--", f.launcher.unit]).catch(() => {});
+  })
     .catch((e) => stopErrors.set(id, String(e.message ?? e).slice(0, 300)))
     .finally(() => {
       stopping.delete(id);
-      cancelled.delete(id);
+      expectServer();
     });
 }
 

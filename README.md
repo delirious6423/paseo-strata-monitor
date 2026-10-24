@@ -71,6 +71,13 @@ npm test
 
 Cross-platform end-to-end checks in throwaway VMs: [TESTING.md](TESTING.md).
 
-![Strata monitor screenshot](assets/screenshot.png)
+![The Strata screen in Paseo: model picker grouped by provider, a loaded model and its live speed](assets/screenshot.png)
+
+| Phone | Phone, dark | Model discovery settings |
+|---|---|---|
+| ![Strata screen on a phone](assets/phone.png) | ![Strata screen on a phone, dark theme](assets/phone-dark.png) | ![Model discovery settings](assets/settings.png) |
+
+Screenshots: Paseo 0.12.0 in a throwaway VM with demo models (real names and sizes, empty weights) and a stand-in
+Strata server, so the speeds are made up; `tests/vm/screenshot.sh` recreates them.
 
 MIT licensed.

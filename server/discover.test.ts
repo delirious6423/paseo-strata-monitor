@@ -239,7 +239,7 @@ test("malformed settings and metadata skip that part only", async () => {
   o.env.STRATA_INSTALL_DIR = inst;
   const d = await discover(o);
   assert.deepEqual(d.models.map((m) => [bare(m.id), m.provider]).sort(), [["cfg:good", "Alpha"], ["cfg:odd", "Unknown provider"], ["cfg:x", "Unknown provider"]]);
-  assert.equal(d.models.find((m) => bare(m.id) === "cfg:x")?.quant, "EXL3 EXL3");
+  assert.equal(d.models.find((m) => bare(m.id) === "cfg:x")?.quant, "EXL3");
   writeFileSync(join(inst, "strata-broken.json"), "{ nope");
   assert.match((await discover(o)).places.find((p) => p.path === inst)?.note ?? "", /^1 JSON file skipped/);
   delete o.env.STRATA_INSTALL_DIR;
@@ -264,4 +264,18 @@ test("parsers: commented-out --config lines, escaped quotes in ExecStart, --host
   const { cardFor } = await import("./models.ts");
   const card = await cardFor({ exe: "e", args: ["--port", "9001", "--host", "10.0.0.5"], port: 8080 });
   assert.deepEqual([card.port, card.host], [9001, "10.0.0.5"]);
+});
+
+test("EXL3 bits from the head of a quantization_config.json far larger than the read limit", async () => {
+  const { home, o } = machine();
+  const inst = join(home, "Strata");
+  install(inst, {});
+  const dir = join(inst, "models", "Fam-exl3");
+  mkdirSync(dir, { recursive: true });
+  const tensors = Object.fromEntries(Array.from({ length: 40_000 }, (_, i) => [`model.layers.${i}.weight`, { bits: 3 }]));
+  writeFileSync(join(dir, "quantization_config.json"), JSON.stringify({ quant_method: "exl3", bits: 2.66, head_bits: 6, tensor_storage: tensors }));
+  writeFileSync(join(inst, "strata-e.json"), JSON.stringify({ exe: "e", args: ["--exl3", dir], model_name: "e" }));
+  o.env.STRATA_INSTALL_DIR = inst;
+  const [m] = (await discover(o)).models;
+  assert.equal(m?.quant, "EXL3 2.66 bpw h6");
 });

@@ -6,6 +6,8 @@
     "paseo": ">=0.12.0"
   },
   "media": [
-    "assets/screenshot.png"
+    "assets/screenshot.png",
+    "assets/phone.png",
+    "assets/settings.png"
   ]
 }

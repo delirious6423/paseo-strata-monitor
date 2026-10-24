@@ -8,7 +8,11 @@ template and plain units, extra folders, split GGUFs, HF cache), picker order, s
 from the 2026-10-24 review: ids stay with their config across rescans; malformed settings/metadata skip only that
 part; split GGUFs past 64 parts report an unknown size; commented-out `--config` lines and escaped quotes; a saved
 connection's prefix cannot change the host; credentials go only to servers whose `/health` says Strata (real HTTP
-servers, checked headers); Windows `.cmd` lines refuse `%`/`!`/quotes.
+servers, checked headers, also on steady-state polls and when a saved connection shares a URL); `/health` counts as
+ready only with `loaded: true`; Windows `.cmd` lines refuse `%`/`!`/quotes; EXL3 bits read from the head of a
+`quantization_config.json` larger than the read limit. `server/control.test.ts` (Linux) drives load/stop against a
+fake `systemctl` that is slow on `reset-failed`: an Abort in that window, or one Stop after several Loads, never
+lets the model start.
 
 ## End-to-end in throwaway VMs
 
@@ -29,12 +33,20 @@ existing run and discards its own VM afterwards.
 | Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 20/20 |
 | Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 20/20 |
 | Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 20/20 |
-| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 20/20 (1 of 2 runs: first listener scan empty, see below) |
+| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 20/20 (2 of 3 runs; one run: first listener scan empty, see below) |
 | macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 20/20 |
 
 Known flake: on the emulated Windows ARM64 VM, PowerShell's first start can exceed the listener scan's 8 s
 timeout, so that one scan comes back empty; the next scan (10 s later) finds the server. On such a slow machine
 the Load guard against a foreign Strata server is skipped for that scan (it fails open, not closed).
+
+## Screenshots
+
+`tests/vm/screenshot.sh` runs the real Paseo daemon from the Paseo AppImage (as Node) in a throwaway Incus VM,
+installs the plugin from a `git archive` of HEAD (what a public install gets, no `node_modules`), builds a demo
+Strata machine (`tests/vm/demo.mjs`: the author's model line-up as sparse files with real-shaped metadata) and
+lets the host's Brave (headless, `puppeteer-core`) press Load in Paseo's web client and capture desktop and phone,
+light and dark, plus the settings screen into `assets/`. Last run 2026-10-24: plugin `running`, Load reached Ready.
 
 Not covered by the VMs: the real Strata CLI and engine (no GPU or models in a VM; the real `profile`/`runtime`
 path was run on the author's Linux machine with a real model, as were the systemd path and analytics), and the

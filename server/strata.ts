@@ -13,8 +13,9 @@ const TIMEOUT_MS = 1500;
 const CACHE_MS = 400;
 const ENDPOINTS_MS = 10_000;
 
-/** `key`: an explicit credential; `global`: may receive $STRATA_API_KEY (this machine or a URL the user set). */
-type Endpoint = { url: string; key?: string; global?: boolean };
+/** `key`: an explicit credential; `global`: may receive $STRATA_API_KEY (this machine or a URL the user set);
+ * `saved`: a Strata saved connection, whose credential policy (its own key, or none) wins over the others. */
+type Endpoint = { url: string; key?: string; global?: boolean; saved?: boolean };
 
 let extraUrls: string[] = [];
 let portsOf: () => Promise<number[]> = async () => [];
@@ -41,7 +42,7 @@ export async function savedConnections(o: Os): Promise<Endpoint[]> {
       // Its own credential or none: a missing variable never falls back to $STRATA_API_KEY.
       const key = typeof c.credential_env === "string" ? o.env[c.credential_env] || undefined : undefined;
       const prefix = typeof c.prefix === "string" && /^\/[\w./-]*$/.test(c.prefix) ? root(c.prefix) : "";
-      out.push({ url: root(c.url) + prefix, key });
+      out.push({ url: root(c.url) + prefix, key, saved: true });
     } catch {}
   }
   return out;
@@ -63,7 +64,9 @@ export function mergeEndpoints(list: Endpoint[]): Endpoint[] {
   const byUrl = new Map<string, Endpoint>();
   for (const e of list) {
     const had = byUrl.get(e.url);
-    byUrl.set(e.url, had ? { url: e.url, key: had.key ?? e.key, global: had.global || e.global } : e);
+    if (!had) byUrl.set(e.url, e);
+    else if (e.saved || had.saved) byUrl.set(e.url, e.saved ? e : had); // the saved connection's key, or none
+    else byUrl.set(e.url, { url: e.url, key: had.key ?? e.key, global: had.global || e.global });
   }
   return [...byUrl.values()];
 }
@@ -123,7 +126,7 @@ export async function strataHealth(url: string, timeoutMs = TIMEOUT_MS): Promise
   try {
     const res = await fetch(`${url}/health`, { signal: abort.signal, redirect: "error" });
     const body = obj(await res.json().catch(() => null));
-    return res.ok && body.service === "strata" ? { loaded: body.loaded !== false } : null;
+    return res.ok && body.service === "strata" ? { loaded: body.loaded === true } : null;
   } catch {
     return null;
   } finally {
@@ -131,12 +134,13 @@ export async function strataHealth(url: string, timeoutMs = TIMEOUT_MS): Promise
   }
 }
 
+/** `verified`: /health said Strata on the last scan; enough to read keyless /metrics, never to send a key. */
 export async function fetchMetrics({ url, key, global }: Endpoint, verified = false): Promise<Snapshot> {
-  if (!verified && !(await strataHealth(url))) throw new Error("not a Strata server");
+  const bearer = key ?? (global ? process.env.STRATA_API_KEY : undefined);
+  if ((bearer || !verified) && !(await strataHealth(url))) throw new Error("not a Strata server");
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
-    const bearer = key ?? (global ? process.env.STRATA_API_KEY : undefined);
     const res = await fetch(`${url}/metrics`, {
       headers: bearer ? { Authorization: `Bearer ${bearer}` } : undefined,
       signal: abort.signal,
@@ -171,6 +175,17 @@ async function scan(): Promise<Snapshot> {
 }
 
 let lastOffline: Snapshot | null = null;
+let expectUntil = 0;
+
+/** A model is starting or stopping: scan on every poll for a while, so the screen follows within one poll. */
+export function expectServer(ms = 5 * 60_000) {
+  expectUntil = Date.now() + ms;
+  servers = { ...servers, at: 0 };
+  lastOffline = null;
+}
+
+/** The Strata servers the last scan found (no new scan). */
+export const recentServers = () => servers.list;
 
 async function probe(): Promise<Snapshot> {
   // Steady state: one request to the last working server; a full scan every 10 s or when it stops answering.
@@ -181,9 +196,10 @@ async function probe(): Promise<Snapshot> {
       return { ...(await fetchMetrics(lastGood, true)), servers: servers.list };
     } catch {}
   }
-  if (!lastGood && recent && lastOffline) return lastOffline;
+  if (!lastGood && recent && lastOffline && Date.now() > expectUntil) return lastOffline;
   const snap = await scan();
   lastOffline = snap.online ? null : snap;
+  if (snap.online) expectUntil = 0;
   return snap;
 }
 
