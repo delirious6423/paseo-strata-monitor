@@ -20,7 +20,7 @@ function Bar({ value, color, track }: { value: number; color: string; track: str
   );
 }
 
-export function Monitor({ theme, layout }: PluginScreenProps) {
+export function Monitor({ theme, layout, openSettings }: PluginScreenProps & { openSettings?: () => void }) {
   const { data, error } = useStrata();
 
   const [history, setHistory] = useState<number[]>([]);
@@ -49,7 +49,7 @@ export function Monitor({ theme, layout }: PluginScreenProps) {
     [c, pad, layout.compact],
   );
 
-  const controls = <Controls theme={theme} styles={styles} />;
+  const controls = <Controls theme={theme} styles={styles} openSettings={openSettings} />;
   if (!data) {
     return (
       <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
@@ -119,6 +119,11 @@ function Online({
             <Stat styles={styles} label="Mean prefill" value={fmt(data.prefillTokSMean, 0, " tok/s")} />
             <Stat styles={styles} label="Elapsed" value={fmt(data.elapsedS, 1, " s")} />
           </>
+        ) : null}
+        {data.servers.length > 1 ? (
+          <Text style={styles.label}>
+            Also running: {data.servers.filter((s) => s.url !== data.url).map((s) => `${s.model ?? "?"} (${s.url})`).join(", ")}
+          </Text>
         ) : null}
         <Stat styles={styles} label="Queued" value={fmt(data.queued)} />
         <Stat styles={styles} label="Context" value={fmt(data.maxContext)} />

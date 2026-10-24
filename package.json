@@ -30,7 +30,7 @@
     "typescript": "^5.9.3",
     "zod": "^4.4.3"
   },
-  "description": "Live Strata inference server status in Paseo: sidebar prefill/decode tok/s and a detail screen",
+  "description": "Find, load and stop local Strata models from Paseo, with live server speed and load",
   "license": "MIT",
   "repository": {
     "type": "git",

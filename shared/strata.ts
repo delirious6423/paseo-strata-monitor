@@ -24,6 +24,7 @@ export const snapshotSchema = z.object({
     util: num, tempC: num, powerW: num, memUsed: num, memTotal: num, cpu: num, ramUsed: num, ramTotal: num,
   }),
   totals: z.object({ requests: num, promptTokens: num, outputTokens: num }),
+  servers: z.array(z.object({ url: z.string(), model: z.string().nullable() })),
   recent: z.array(
     z.object({ time: num, durationS: num, finish: z.string().nullable(), promptTokens: num, outputTokens: num, tokS: num }),
   ),

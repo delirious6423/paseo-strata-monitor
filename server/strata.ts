@@ -1,12 +1,59 @@
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Snapshot } from "../shared/strata";
+import { strataListeners } from "./listeners";
+import { DEFAULT_PORTS, type Os, connectionDir, here } from "./places";
+
+// Where the analytics read from: every Strata server this machine can see, found again every 10 s from
+// (1) URLs set in the plugin settings, (2) local listeners owned by a Strata server process,
+// (3) the ports of discovered models, (4) Strata's saved monitor connections, (5) Strata's default ports.
+// A candidate counts only if its /metrics answers with Strata's shape.
 
 const TIMEOUT_MS = 1500;
 const CACHE_MS = 400;
-const CANDIDATES = (process.env.STRATA_URL ?? "http://127.0.0.1:8080,http://127.0.0.1:8093")
-  .split(",")
-  .map((url) => url.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
-const KEY = process.env.STRATA_API_KEY;
+const ENDPOINTS_MS = 10_000;
+
+type Endpoint = { url: string; key?: string };
+
+let extraUrls: string[] = [];
+let portsOf: () => Promise<number[]> = async () => [];
+let os: Os = here();
+export function configureEndpoints(next: { extraUrls?: string[]; knownPorts?: () => Promise<number[]> }, o?: Os) {
+  if (next.extraUrls) extraUrls = next.extraUrls;
+  if (next.knownPorts) portsOf = next.knownPorts;
+  if (o) os = o;
+  servers = { at: 0, list: [] };
+}
+
+const root = (u: string) => u.trim().replace(/\/+$/, "");
+const local = (port: number): Endpoint => ({ url: `http://127.0.0.1:${port}` });
+
+/** Strata's saved connections: {url, prefix, credential_env}; the credential stays in that env variable. */
+export async function savedConnections(o: Os): Promise<Endpoint[]> {
+  const dir = connectionDir(o);
+  const out: Endpoint[] = [];
+  for (const f of (await readdir(dir).catch(() => [] as string[])).filter((x) => x.endsWith(".json")).slice(0, 64)) {
+    try {
+      const c = JSON.parse(await readFile(join(dir, f), "utf8"));
+      if (typeof c.url !== "string" || !/^https?:\/\//.test(c.url)) continue;
+      const key = typeof c.credential_env === "string" ? o.env[c.credential_env] : undefined;
+      out.push({ url: root(c.url) + (typeof c.prefix === "string" ? c.prefix : ""), key });
+    } catch {}
+  }
+  return out;
+}
+
+export async function candidates(): Promise<Endpoint[]> {
+  const list: Endpoint[] = [
+    ...extraUrls.filter((u) => /^https?:\/\//.test(u)).map((u) => ({ url: root(u) })),
+    ...(await strataListeners().catch(() => [])).map(local),
+    ...(await portsOf().catch(() => [])).map(local),
+    ...(await savedConnections(os)),
+    ...DEFAULT_PORTS.map(local),
+  ];
+  const seen = new Set<string>();
+  return list.filter((e) => !seen.has(e.url) && seen.add(e.url));
+}
 
 type Json = Record<string, unknown>;
 const obj = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
@@ -20,6 +67,7 @@ const offline = (error: string): Snapshot => ({
   gpu: { util: null, tempC: null, powerW: null, memUsed: null, memTotal: null, cpu: null, ramUsed: null, ramTotal: null },
   totals: { requests: null, promptTokens: null, outputTokens: null },
   recent: [],
+  servers: [],
 });
 
 /** Map Strata's `/metrics` body to the compact snapshot the screen renders. */
@@ -48,44 +96,59 @@ export function toSnapshot(url: string, raw: unknown): Snapshot {
     },
     totals: { requests: num(totals.requests), promptTokens: num(totals.prompt_tokens), outputTokens: num(totals.output_tokens) },
     recent,
+    servers: [],
   };
 }
 
-async function fetchMetrics(url: string): Promise<Snapshot> {
+/** Strata's /metrics carries an engine or live section; anything else on that port is not Strata. */
+export const isStrataMetrics = (raw: unknown) => !!raw && typeof raw === "object" && ("engine" in raw || "live" in raw);
+
+async function fetchMetrics({ url, key }: Endpoint): Promise<Snapshot> {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
+    const bearer = key ?? process.env.STRATA_API_KEY;
     const res = await fetch(`${url}/metrics`, {
-      headers: KEY ? { Authorization: `Bearer ${KEY}` } : undefined,
+      headers: bearer ? { Authorization: `Bearer ${bearer}` } : undefined,
       signal: abort.signal,
       redirect: "error",
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return toSnapshot(url, await res.json());
+    const raw = await res.json();
+    if (!isStrataMetrics(raw)) throw new Error("not a Strata server");
+    return toSnapshot(url, raw);
   } finally {
     clearTimeout(timer);
   }
 }
 
-let lastGood: string | null = null;
+let lastGood: Endpoint | null = null;
+let servers: { at: number; list: Snapshot["servers"] } = { at: 0, list: [] };
 let inFlight: Promise<Snapshot> | null = null;
 let cached: { at: number; value: Snapshot } | null = null;
 
-async function probe(): Promise<Snapshot> {
-  // Last working URL first, so the steady state is one request per poll.
-  const order = lastGood ? [lastGood, ...CANDIDATES.filter((u) => u !== lastGood)] : CANDIDATES;
-  let error = "unreachable";
-  for (const url of order) {
-    try {
-      const snap = await fetchMetrics(url);
-      lastGood = url;
-      return snap;
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
+async function scan(): Promise<Snapshot> {
+  const list = await candidates();
+  const ok = (await Promise.allSettled(list.map(fetchMetrics))).flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  servers = { at: Date.now(), list: ok.map((s) => ({ url: s.url ?? "", model: s.model })) };
+  if (!ok.length) {
+    lastGood = null;
+    return offline(`no Strata server answered (${list.length} places checked)`);
   }
-  lastGood = null;
-  return offline(error);
+  // Prefer a server that is working on a request, then the first found.
+  const best = ok.find((s) => s.state === "generating") ?? ok[0]!;
+  lastGood = list.find((e) => e.url === best.url) ?? null;
+  return { ...best, servers: servers.list };
+}
+
+async function probe(): Promise<Snapshot> {
+  // Steady state: one request to the last working server; a full scan every 10 s or when it stops answering.
+  if (lastGood && Date.now() - servers.at < ENDPOINTS_MS) {
+    try {
+      return { ...(await fetchMetrics(lastGood)), servers: servers.list };
+    } catch {}
+  }
+  return scan();
 }
 
 /** Coalesces concurrent callers (several clients/hosts) into one upstream request. */

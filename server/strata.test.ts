@@ -24,3 +24,24 @@ test("tolerates missing and hostile fields", () => {
   snapshotSchema.parse(toSnapshot("http://x", { live: { tok_s: "NaN" }, requests: [null, 5], hardware: [] }));
   snapshotSchema.parse(toSnapshot("http://x", null));
 });
+
+test("only Strata-shaped /metrics count as a Strata server", async () => {
+  const { isStrataMetrics } = await import("./strata.ts");
+  assert.ok(isStrataMetrics(sample));
+  assert.ok(!isStrataMetrics({ status: "ok" }));
+  assert.ok(!isStrataMetrics(null));
+});
+
+test("Strata's saved connections: URL + prefix, credential from the named env variable", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { savedConnections } = await import("./strata.ts");
+  const home = mkdtempSync(join(tmpdir(), "strata-conn-"));
+  const dir = join(home, ".config/strata/connections");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "box.json"), JSON.stringify({ schema_version: 1, id: "box", url: "https://box.example", prefix: "/strata", credential_env: "BOX_KEY" }));
+  writeFileSync(join(dir, "bad.json"), JSON.stringify({ url: "file:///etc/passwd" }));
+  const found = await savedConnections({ windows: false, home, env: { BOX_KEY: "k" } });
+  assert.deepEqual(found, [{ url: "https://box.example/strata", key: "k" }]);
+});

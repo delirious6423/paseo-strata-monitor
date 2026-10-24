@@ -1,7 +1,7 @@
 {
   "id": "strata-monitor",
-  "name": "Strata monitor",
-  "description": "Live Strata inference server status in Paseo: sidebar prefill/decode tok/s and a detail screen",
+  "name": "Strata",
+  "description": "Find, load and stop local Strata models from Paseo, with live server speed and load",
   "requirements": {
     "paseo": ">=0.12.0"
   },
