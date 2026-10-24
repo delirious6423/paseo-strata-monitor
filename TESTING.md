@@ -36,7 +36,7 @@ existing run and discards its own VM afterwards.
 | Linux x64 | `tests/vm/run.sh` (Incus, Ubuntu 26.04, Node 22 from apt) | PASS 29/29 |
 | Linux ARM64 | `tests/vm/macos.sh linux-arm` (Tart on Apple Silicon, Ubuntu) | PASS 28/28 (29th check not yet run there) |
 | Windows x64 | `tests/vm/windows.sh` (Incus, Windows 11 26300) | PASS 28/28 (29th check not yet run there) |
-| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 29/29 (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
+| Windows ARM64 | `tests/vm/windows.sh --arm64` (QEMU/hvf on Apple Silicon) | PASS 28/28, 29th check not yet run there (earlier 20-check runs: 3 of 4; one first listener scan empty, see below) |
 | macOS ARM64 | `tests/vm/macos.sh` (Tart, macOS 26.6) | PASS 28/28 (29th check not yet run there) |
 
 Known flake: on the emulated Windows ARM64 VM, PowerShell's first start can exceed the listener scan's 8 s
