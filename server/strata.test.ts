@@ -43,5 +43,6 @@ test("Strata's saved connections: URL + prefix, credential from the named env va
   writeFileSync(join(dir, "box.json"), JSON.stringify({ schema_version: 1, id: "box", url: "https://box.example", prefix: "/strata", credential_env: "BOX_KEY" }));
   writeFileSync(join(dir, "bad.json"), JSON.stringify({ url: "file:///etc/passwd" }));
   const found = await savedConnections({ windows: false, home, env: { BOX_KEY: "k" } });
+  (await import("node:fs")).rmSync(home, { recursive: true, force: true });
   assert.deepEqual(found, [{ url: "https://box.example/strata", key: "k" }]);
 });

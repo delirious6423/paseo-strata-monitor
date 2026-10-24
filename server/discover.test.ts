@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { groupEngines } from "../shared/group.ts";
 import { parseShow } from "./control.ts";
 import { configFromScript, discover, splitExec } from "./discover.ts";
@@ -28,8 +28,12 @@ function gguf(kvs: [string, number, unknown][]): Buffer {
   return Buffer.concat(parts);
 }
 
+const homes: string[] = [];
+after(() => homes.forEach((h) => rmSync(h, { recursive: true, force: true })));
+
 function machine(windows = false) {
   const home = mkdtempSync(join(tmpdir(), "strata-home-"));
+  homes.push(home);
   const env: Record<string, string> = {};
   if (windows) Object.assign(env, { APPDATA: join(home, "Roaming"), LOCALAPPDATA: join(home, "Local") });
   const o: Os = { windows, home, env };
