@@ -64,11 +64,11 @@ function ConfigEditor({ theme, styles, sel, busy }: Props) {
   const disabled = busy || !stopped || action.isPending;
   const button = (label: string, onPress: () => void, off = false, selected = false) => (
     <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: off, selected }} disabled={off} onPress={onPress}
-      style={({ pressed }) => ({ paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderRadius: 8, borderColor: selected ? c.accent : c.border, backgroundColor: pressed ? c.surface2 : "transparent", opacity: off ? 0.45 : 1 })}>
+      style={({ pressed }) => ({ minHeight: 48, maxWidth: "100%", justifyContent: "center", paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1, borderRadius: 8, borderColor: selected ? c.accent : c.border, backgroundColor: pressed ? c.surface2 : "transparent", opacity: off ? 0.45 : 1 })}>
       <Text style={{ color: selected ? c.accent : c.foreground, fontSize: 14, fontWeight: "600" }}>{label}</Text>
     </Pressable>
   );
-  const fieldStyle = { color: c.foreground, backgroundColor: c.surface2, borderColor: c.border, borderWidth: 1, borderRadius: 8, padding: 8, fontSize: 14, minHeight: 40 };
+  const fieldStyle = { color: c.foreground, backgroundColor: c.surface2, borderColor: c.border, borderWidth: 1, borderRadius: 8, padding: 12, fontSize: 16, minHeight: 48 };
   const changed = (field: ConfigField, text: string) => {
     setJson(old => old ?? source); setRevision(old => old ?? digest ?? null);
     setDrafts(old => ({ ...old, [field.key]: text })); setMessage(""); action.reset();

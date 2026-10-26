@@ -34,7 +34,15 @@ const pass = label => { count++; console.log(`PASS ${label}`); };
 try {
   await page.setViewport({ width: 1280, height: 900 });
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-  await wait("Strata"); await click("Strata"); await wait("Thorough · up to 2 h");
+  await wait("Strata"); await click("Strata"); await wait("Selected model");
+  assert.ok(!(await text()).includes("Thorough · up to 2 h"));
+  assert.ok(!(await text()).includes("Show server log"));
+  await click("Change model"); await wait("Close model list");
+  const selection = await page.$('[aria-label^="Select Agention"]');
+  assert.ok(selection); await selection.click();
+  assert.ok(!(await text()).includes("Close model list"));
+  pass("model picker and task sections start collapsed; selecting closes picker");
+  await click("Tuning and benchmarks"); await wait("Thorough · up to 2 h");
   assert.ok(!(await text()).includes("Tuning workload"));
   assert.ok(!(await text()).includes("Context tokens"));
   pass("advanced panels and server log start collapsed");
@@ -45,7 +53,11 @@ try {
   await fill("Time budget in minutes (blank uses mode default)", "oops");
   assert.equal(await page.$eval('[aria-label="Time budget in minutes (blank uses mode default)"]', e => e.value), "oops");
   await fill("Time budget in minutes (blank uses mode default)", "1.5");
-  pass("numeric drafts preserve decimal input and invalid text without showing NaN");
+  await click("Tuning and benchmarks");
+  assert.ok(!(await text()).includes("Tuning workload"));
+  await click("Tuning and benchmarks");
+  assert.equal(await page.$eval('[aria-label="Time budget in minutes (blank uses mode default)"]', e => e.value), "1.5");
+  pass("numeric drafts preserve decimal input, invalid text and collapsed section state");
   await click("Tuning workload: coding"); await click("Tuning objective: reserve");
   await fill("Graphics memory to leave free (MiB)", "1024");
   await click("Allow small answer differences"); await click("Allow answers that differ between identical runs");
@@ -68,11 +80,27 @@ try {
   pass("all six benchmark suites switch; invalid condition/credential names rejected; unsupported match removed");
   await click("Hide benchmark options");
   await click("Load"); await wait("Ready on port", 90000);
+  await wait("Autotune thorough");
+  assert.ok((await text()).includes("Thorough also tests settings"));
+  await wait("Prefill");
+  await page.setViewport({ width: 320, height: 740 });
+  await page.evaluate(() => { for (const e of document.querySelectorAll('*')) if (e.scrollTop) e.scrollTop = 0; });
+  await page.screenshot({ path: join(output, "phone-small-online.png"), fullPage: true });
+  const liveOverflow = await page.evaluate(() => {
+    const button = document.querySelector('[aria-label="Change model"]');
+    const root = button.parentElement.parentElement.parentElement;
+    return [...root.querySelectorAll('*')].filter(e => e.getClientRects().length && e.getBoundingClientRect().right > innerWidth + 1).map(e => e.textContent.slice(0, 80));
+  });
+  assert.deepEqual(liveOverflow, [], '320px online metrics and tools fit');
+  await page.setViewport({ width: 1280, height: 900 });
+  pass('loading preserves tuning selection and open section; live metrics fit 320px');
   await click("Benchmark · serving-smoke"); await click("Press again: run serving-smoke");
+  await click("Activity and updates");
   await wait("Show details (3)");
   assert.ok(!(await text()).includes("One request: 42.5 tok/s"));
   await click("Show details (3)"); await wait("One request: 42.5 tok/s"); await click("Hide details (3)");
   pass("benchmark runs with confirmation and result details collapse");
+  await click("Configuration and presets");
   await click("Model configuration"); await wait("Context tokens");
   await click("Advanced: full configuration JSON");
   assert.ok(await page.$('[aria-label="Full model configuration JSON"]'));
@@ -103,13 +131,56 @@ try {
   await fill("Paste preset JSON to import", exported); await click("Import as inactive preset"); await wait("It is not applied.");
   pass("preset inspect/rename/export/import round trip through real plugin RPC and fixture CLI");
   await click("Hide preset management");
-  for (const [name, width, height, dark] of [["desktop-light",1280,900,false],["desktop-dark",1280,900,true],["phone-light",390,844,false],["phone-dark",390,844,true]]) {
+  await click("Configuration and presets");
+  await click("Tuning and benchmarks");
+  await click("Activity and updates");
+  for (const [name, width, height, dark] of [["desktop-light",1280,900,false],["desktop-dark",1280,900,true],["phone-light",390,844,false],["phone-dark",390,844,true],["phone-air",420,912,true],["phone-small",320,740,true]]) {
     await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: dark ? "dark" : "light" }]);
     await page.setViewport({ width, height, deviceScaleFactor: 1 });
+    await page.evaluate(() => { for (const e of document.querySelectorAll('*')) if (e.scrollTop) e.scrollTop = 0; });
     await page.screenshot({ path: join(output, `${name}.png`), fullPage: true });
+    const geometry = await page.evaluate(() => {
+      const button = [...document.querySelectorAll('[role="button"]')].find(e => e.getAttribute('aria-label') === 'Change model');
+      const root = button?.parentElement?.parentElement?.parentElement;
+      if (!root) throw new Error('Missing plugin layout');
+      const visible = [...root.querySelectorAll('[role="button"],[role="radio"],input,textarea')].filter(e => e.getClientRects().length);
+      const task = root.querySelector('[aria-label="Tuning and benchmarks"]');
+      return {
+        modelHeight: button.parentElement.getBoundingClientRect().height,
+        taskHeight: task.parentElement.parentElement.getBoundingClientRect().height,
+        overflow: [...root.querySelectorAll('*')].filter(e => e.getClientRects().length && e.getBoundingClientRect().right > innerWidth + 1).map(e => e.textContent.slice(0, 80)),
+        small: visible.filter(e => e.getBoundingClientRect().height < 44).map(e => e.getAttribute('aria-label') || e.textContent),
+      };
+    });
+    assert.deepEqual(geometry.overflow, [], `${name}: horizontal overflow`);
+    assert.deepEqual(geometry.small, [], `${name}: undersized touch targets`);
+    if (name === 'phone-air') {
+      assert.ok(geometry.modelHeight <= 300, `compact model card: ${geometry.modelHeight}px`);
+      assert.ok(geometry.taskHeight <= 90, `compact task card: ${geometry.taskHeight}px`);
+      console.log(`Phone Air geometry: model ${geometry.modelHeight}px, task ${geometry.taskHeight}px`);
+    }
     assert.ok(!(await text()).includes("Context tokens"));
     pass(`${name} collapsed layout`);
   }
+  await click("Change model");
+  await page.screenshot({ path: join(output, "phone-small-picker.png"), fullPage: true });
+  await click("Change model");
+  await click("Tuning and benchmarks");
+  await click("Show benchmark options");
+  await click("Configuration and presets");
+  await click("Model configuration");
+  await wait("Context tokens");
+  const expandedProblems = await page.evaluate(() => {
+    const button = document.querySelector('[aria-label="Change model"]');
+    const root = button.parentElement.parentElement.parentElement;
+    return [...root.querySelectorAll('*')].filter(e => e.getClientRects().length &&
+      (e.getBoundingClientRect().right > innerWidth + 1 ||
+      (e.matches('[role="button"],[role="radio"],input,textarea') && e.getBoundingClientRect().height < 44)))
+      .map(e => e.getAttribute('aria-label') || e.textContent.slice(0, 80));
+  });
+  assert.deepEqual(expandedProblems, [], '320px expanded controls fit and have touch targets');
+  assert.ok(await page.$eval('[aria-label="Context tokens"]', e => parseFloat(getComputedStyle(e).fontSize) >= 16));
+  pass('320px expanded forms: no overflow, 44px targets, 16px inputs');
   assert.equal(errors.length, 0, errors.join("\n"));
   console.log(`ALL PASS ${count} UI checks`);
 } catch (e) {

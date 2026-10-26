@@ -8,6 +8,7 @@ import { gb, groupEngines } from "../shared/group";
 import type { Styles } from "./monitor";
 import { ServerLog } from "./extras";
 import { Tools } from "./tools";
+import { Section } from "./section";
 
 const BUSY_MS = 1000;
 const IDLE_MS = 3000;
@@ -36,6 +37,8 @@ function status(e: Engine): string {
       return "Stopping…";
     case "failed":
       return "Failed to start";
+    case "unknown":
+      return "Status unknown · stop to recover";
     default:
       return "Stopped";
   }
@@ -49,6 +52,7 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
   const load = useRpc(strataLoad);
   const stop = useRpc(strataStop);
   const [picked, setPicked] = useState<string | null>(null);
+  const [choosing, setChoosing] = useState(false);
 
   const refresh = () => {
     void client.invalidateQueries({ queryKey: ["strata-engines"] });
@@ -64,8 +68,8 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
   });
 
   const link = (label: string, onPress: () => void) => (
-    <Pressable accessibilityRole="button" onPress={onPress}>
-      <Text style={{ color: c.accent, fontSize: 13 }}>{label}</Text>
+    <Pressable accessibilityRole="button" onPress={onPress} style={{ minHeight: 48, justifyContent: "center" }}>
+      <Text style={{ color: c.accent, fontSize: 14 }}>{label}</Text>
     </Pressable>
   );
 
@@ -123,9 +127,16 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
   const dot = { ready: c.statusSuccess, loading: c.statusWarning, stopping: c.statusWarning, failed: c.statusDanger, unknown: c.statusDanger, stopped: c.border };
 
   return (
+    <View style={styles.stack}>
     <View style={styles.card}>
-      <Text style={styles.title}>Engine</Text>
-      {groupEngines(data.engines).map((g) => (
+      <Text style={styles.label}>Selected model</Text>
+      <Text style={styles.title}>{sel.family}</Text>
+      <Text style={styles.value}>{sel.provider} · {sel.quant} · {gb(sel.sizeBytes)}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Change model" accessibilityState={{ expanded: choosing }}
+        onPress={() => setChoosing(v => !v)} style={{ minHeight: styles.compact ? 44 : 48, justifyContent: "center" }}>
+        <Text style={{ color: c.accent, fontSize: styles.compact ? 14 : 16 }}>{choosing ? "Close model list" : `Change model · ${data.engines.length} available`}</Text>
+      </Pressable>
+      {choosing ? groupEngines(data.engines).map((g) => (
         <View key={g.title} style={{ gap: 6 }}>
           <Text style={[styles.label, { fontSize: 12 }]}>{g.title}</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -137,9 +148,9 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
                   accessibilityRole="button"
                   accessibilityState={{ selected: on }}
                   accessibilityLabel={`Select ${e.provider} ${e.quant}, ${gb(e.sizeBytes)}, ${e.state}`}
-                  onPress={() => setPicked(e.id)}
+                  onPress={() => { setPicked(e.id); setChoosing(false); }}
                   style={{
-                    flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 6, paddingHorizontal: 10,
+                    flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 12, minHeight: 48, maxWidth: "100%",
                     borderRadius: 8, borderWidth: 1, borderColor: on ? c.accent : c.border,
                     backgroundColor: on ? c.surface2 : "transparent",
                   }}
@@ -152,10 +163,7 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
             })}
           </View>
         </View>
-      ))}
-      <Text style={styles.value}>
-        {sel.family} · {sel.provider} · {sel.quant} · {gb(sel.sizeBytes)}
-      </Text>
+      )) : null}
       <Text style={styles.label}>
         {status(sel)}
         {other ? ` · ${other.provider} ${other.quant} is ${other.state}; loading this stops it` : ""}
@@ -166,26 +174,27 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
           started (Strata app, terminal or service) to load a model here.
         </Text>
       ) : null}
-      <Text style={[styles.label, { fontSize: 12 }]}>
-        {sel.name} · {sel.launcher}
-      </Text>
       {sel.error || action.error ? (
         <Text style={{ color: c.statusDanger, fontSize: 12 }}>{action.error?.message ?? sel.error}</Text>
       ) : null}
-      <ServerLog theme={theme} styles={styles} sel={sel} />
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`${label} ${sel.provider} ${sel.quant}`}
         disabled={disabled}
         onPress={() => action.mutate({ kind, id: sel.id })}
         style={{
-          paddingVertical: 10, borderRadius: 8, opacity: disabled ? 0.5 : 1,
+          minHeight: styles.compact ? 44 : 48, justifyContent: "center", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, opacity: disabled ? 0.5 : 1,
           backgroundColor: danger ? c.statusDanger : c.accent,
         }}
       >
-        <Text style={{ color: danger ? c.surface0 : c.accentForeground, textAlign: "center", fontWeight: "600" }}>{label}</Text>
+        <Text style={{ color: danger ? c.surface0 : c.accentForeground, textAlign: "center", fontSize: styles.compact ? 14 : 16, fontWeight: "600" }}>{label}</Text>
       </Pressable>
-      {footer}
+      <Section title="Model details and discovery" hint="Server log, launcher and search locations" theme={theme} compact={styles.compact}>
+        <Text style={styles.label}>{sel.name} · {sel.launcher}</Text>
+        <ServerLog theme={theme} styles={styles} sel={sel} />
+        {footer}
+      </Section>
+    </View>
       <Tools theme={theme} styles={styles} sel={sel} />
     </View>
   );

@@ -3,7 +3,55 @@
 All notable changes to this plugin. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/) (0.x: settings and RPCs may still change).
 
+## [Unreleased]
+
+Expanded dashboard on `main`, after the 0.2.0 tag. Package version remains 0.2.0; no new release tag is
+implied. Details and migration guidance: [current change notes](docs/releases/unreleased.md).
+
+### Added
+
+- Selectable Quick/Thorough tuning depth, chat/coding workload, speed/room/reserve goals, RAM/time budgets,
+  answer-change permissions, custom names, quiet check, boot timeout and measurement-only mode.
+- All six audited benchmark suites with supported serving controls or standard protocol metadata.
+- Model configuration: 30 guided fields and full JSON, stopped-only atomic saves, SHA-256 conflict checks,
+  private backups, non-destructive archiving and explicit per-save consent for pruning to 10 total backups.
+- Preset evidence/details, rename, redacted export, validated matching-slot inactive JSON import and effective
+  settings with raw user overrides.
+- Selected-model default screen, collapsed grouped picker/task cards, mobile-friendly controls and form drafts
+  preserved across section hiding and Load/Stop transitions. Separate UI pass: 17/17 VM browser checks,
+  zero page errors; phone viewports do not establish native mobile acceptance.
+- Compact mobile-only follow-up after iPhone Air feedback: tighter cards, gaps and headings; controls remain
+  at least 44px and inputs 16px, with system text scaling intact. Latest VM run: 18/18 checks, zero page errors,
+  including a 420×912 viewport. Desktop unchanged; current phone screenshots refreshed.
+- Unknown-status recovery, pinned-setting explanations, 22 isolated actual-upstream contract cases and VM
+  browser coverage. Latest accepted matrix: 554 unit passes, 11 platform skips, 235 integration passes and
+  13 browser checks; see [Testing](TESTING.md) for scope and evidence.
+
+### Changed
+
+- Logs and job details stay collapsed, including failures. Answer-changing permissions remain off by default.
+- Saved goals must match the resource-profile slot; resource profile is not itself a memory reservation.
+- Measurement-only tuning restores previous state without unnecessary comparison benchmarks or speed deltas.
+- Preset bookkeeping remains available during benchmarks without releasing the Load guard; queued Stop delay
+  is documented. Numeric drafts preserve decimal entry and invalid text without displaying NaN.
+
+### Fixed
+
+- Invalid imported timestamps/nested metadata could poison persistent preset listing; foreign recheck claims
+  are now cleared and unsupported settings rejected before writes.
+- Failed runtime/systemd probes could be mistaken for stopped; unknown now blocks saves/Load and offers recovery.
+- Raw/captured user overrides could defeat autotune or Re-check; guards reject shadowed candidates before
+  workload disruption, and effective settings reflect overrides after preset application.
+- Guided segment/layer/split/vision edits could leave conflicting arguments in place.
+- URL-only managed-match option always failed and was removed. Condition labels, 80-character names and
+  STRATA_ credential-variable names are validated; empty background lines are omitted.
+- Nonconforming/partial standard protocol results were mislabeled as failed requests; busy-message wording
+  and coverage documentation are corrected.
+
 ## [0.2.0] - 2026-10-25
+
+Historical release snapshot. Defaults, test counts and automatic log expansion below describe that tag,
+not current `main`; use the Unreleased section and current guides for today’s behavior.
 
 From a speed monitor to a control panel for a local Strata: find models, load and stop them, and run Strata's own
 benchmark, autotune and update tools from Paseo, on a phone too. Release notes: [docs/releases/0.2.0.md](docs/releases/0.2.0.md).
@@ -22,7 +70,7 @@ benchmark, autotune and update tools from Paseo, on a phone too. Release notes: 
 - **Tools**, through Strata's own command-line tool, one at a time (Load waits):
   - **Benchmark**: Strata's serving-smoke suite against the running model (tok/s, time to first token, alone
     and 4 at once).
-  - **Autotune** (quick, about 20 minutes): finds the fastest settings and saves them as a preset the server
+  - **Autotune** (quick, about 20 minutes): searches for faster settings and saves them as a preset the server
     applies at every start. A running model is measured before (one warm-up run, then 3 repeats), started again
     and measured after; changes under 10%, or under the runs' own spread, are called "no clear change".
   - **Check for updates / Install update / Undo update**: engine and control from Strata's signed feed, with
@@ -68,7 +116,7 @@ benchmark, autotune and update tools from Paseo, on a phone too. Release notes: 
 - systemd-run models use the first Strata install's command-line tool for the tools.
 - Install update does not change models whose run configs start their own engine files; the screen says so.
 - Windows Cancel ends the process tree outright (no Ctrl+C for another process tree there).
-- On the emulated Windows ARM64 VM, PowerShell's first start can exceed the 8 s listener scan once.
+- On the Windows ARM64 VM, PowerShell's first start can exceed the 8 s listener scan once.
 
 ## [0.1.0] - 2026-10-20
 
@@ -77,5 +125,6 @@ benchmark, autotune and update tools from Paseo, on a phone too. Release notes: 
 - Live Strata status in Paseo: a sidebar row with prefill and decode tok/s, and a screen with a speed graph,
   queue, GPU and RAM use, and recent requests, read from a local Strata server's `/metrics`.
 
-[0.2.0]: https://github.com/delirious6423/paseo-strata-monitor/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/delirious6423/paseo-strata-monitor/releases/tag/v0.1.0
+[Unreleased]: https://github.com/delirious6423/paseo-strata-monitor/compare/v0.2.0...main
+[0.2.0]: https://github.com/delirious6423/paseo-strata-monitor/tree/v0.2.0
+[0.1.0]: https://github.com/delirious6423/paseo-strata-monitor/commit/a9b19d3

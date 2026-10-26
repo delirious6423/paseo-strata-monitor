@@ -9,7 +9,7 @@ import type { Styles } from "./monitor";
 
 const link = (theme: PluginTheme, label: string, onPress: () => void, opts: { disabled?: boolean; danger?: boolean } = {}) => (
   <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={opts.disabled} onPress={onPress}
-    style={{ paddingVertical: 4, paddingHorizontal: 2, opacity: opts.disabled ? 0.45 : 1 }}>
+    style={{ minHeight: 48, justifyContent: "center", paddingVertical: 8, paddingHorizontal: 4, opacity: opts.disabled ? 0.45 : 1 }}>
     <Text style={{ color: opts.danger ? theme.colors.statusDanger : theme.colors.accent, fontSize: 13 }}>{label}</Text>
   </Pressable>
 );

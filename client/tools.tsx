@@ -8,6 +8,7 @@ import { type Job, strataBench, strataCancel, strataRollback, strataTools, strat
 import { Presets } from "./extras";
 import { ModelConfig } from "./model-config";
 import { PresetAdmin } from "./preset-admin";
+import { Section } from "./section";
 import { benchOptionsSchema, tuneOptionsSchema } from "../shared/options";
 import { BenchSettings, TuneSettings } from "./tool-options";
 import type { Styles } from "./monitor";
@@ -84,25 +85,28 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       disabled={opts.disabled}
       onPress={onPress}
       style={{
-        paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, opacity: opts.disabled ? 0.45 : 1,
+        minHeight: 48, maxWidth: "100%", justifyContent: "center", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, opacity: opts.disabled ? 0.45 : 1,
         borderColor: opts.warn ? c.statusWarning : c.border, backgroundColor: opts.warn ? c.surface2 : "transparent",
       }}
     >
-      <Text style={{ color: c.foreground, fontSize: 13 }}>{label}</Text>
+      <Text style={{ color: c.foreground, fontSize: 16, lineHeight: 24 }}>{label}</Text>
     </Pressable>
   );
 
   const busy = !!running || act.isPending;
   const u = data?.update ?? null;
   return (
-    <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: c.border, paddingTop: 10 }}>
-      <Text style={[styles.label, { fontSize: 12 }]}>Tools · {sel.provider} {sel.quant}</Text>
+    <View style={styles.stack}>
+      {running ? <View style={styles.card}><Running job={running} theme={theme} styles={styles} onCancel={() => act.mutate(() => cancel({}))} /></View> : null}
+      {act.error || checking.error ? <Text style={{ color: c.statusDanger, fontSize: 14 }}>{(act.error ?? checking.error)?.message}</Text> : null}
+      <View style={styles.card}>
+      <Section title="Tuning and benchmarks" hint="Measure speed or find better settings" theme={theme} compact={styles.compact}>
       <View accessibilityRole="radiogroup" accessibilityLabel="Autotune depth" style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {(["quick", "thorough"] as const).map((mode) => (
           <Pressable key={mode} accessibilityRole="radio" accessibilityState={{ checked: tuneMode === mode, disabled: busy }}
             accessibilityLabel={mode === "quick" ? "Quick autotune" : "Thorough autotune"} disabled={busy}
             onPress={() => { setTuneMode(mode); setConfirm(null); }}
-            style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1,
+            style={{ minHeight: 48, justifyContent: "center", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1,
               opacity: busy ? 0.45 : 1, borderColor: tuneMode === mode ? c.accent : c.border,
               backgroundColor: tuneMode === mode ? c.surface2 : "transparent" }}>
             <Text style={{ color: c.foreground, fontSize: 14 }}>{mode === "quick" ? "Quick · up to 20 min" : "Thorough · up to 2 h"}</Text>
@@ -124,7 +128,6 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
           ? `Press again: ${tuneOptions.minutes !== null ? `up to ${tuneOptions.minutes} min` : tuneMode === "quick" ? "up to 20 min" : "up to 2 h"}${tuneOptions.allowSmallDifferences || tuneOptions.allowNotRepeatable ? ", answers may change" : ""}${sel.state === "ready" ? tuneOptions.save ? ", restarts the model, speed before/after" : ", restarts with previous settings, no before/after comparison" : ", stops the running model"}${sel.keepsTuning === false ? ", result not kept" : ""}`
           : `Autotune ${tuneMode}`,
           () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: tuneMode, options: tuneOptions }))), { disabled: busy || !tuneValidation.success, warn: confirm === "tune" })}
-        {button(checking.isPending ? "Checking…" : "Check for updates", () => checking.mutate(), { disabled: busy || checking.isPending })}
       </View>
       {sel.keepsTuning === false ? (
         <Text style={{ color: c.statusWarning, fontSize: 12 }}>
@@ -135,16 +138,19 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       {sel.state !== "ready" && !running ? (
         <Text style={[styles.label, { fontSize: 12 }]}>Benchmark measures the running model: load it first.</Text>
       ) : null}
-      {act.error || checking.error ? (
-        <Text style={{ color: c.statusDanger, fontSize: 12 }}>{(act.error ?? checking.error)?.message}</Text>
-      ) : null}
-
+      </Section>
+      </View>
+      <View style={styles.card}>
+      <Section title="Configuration and presets" hint="Launch settings and saved tuning" theme={theme} compact={styles.compact}>
       <ModelConfig theme={theme} styles={styles} sel={sel} busy={busy} />
       <Presets theme={theme} styles={styles} sel={sel} busy={busy} mutationBusy={act.isPending || (!!running && running.kind !== "bench")} />
       <PresetAdmin key={sel.id} theme={theme} styles={styles} sel={sel} busy={act.isPending || (!!running && running.kind !== "bench")} />
 
-      {running ? <Running job={running} theme={theme} styles={styles} onCancel={() => act.mutate(() => cancel({}))} /> : null}
-
+      </Section>
+      </View>
+      <View style={styles.card}>
+      <Section title="Activity and updates" hint="Recent results and engine maintenance" theme={theme} compact={styles.compact}>
+      {button(checking.isPending ? "Checking…" : "Check for updates", () => checking.mutate(), { disabled: busy || checking.isPending })}
       {u ? (
         <View style={{ gap: 4 }}>
           <Text style={styles.value}>
@@ -191,6 +197,8 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
           )) : null}
         </View>
       ))}
+      </Section>
+      </View>
     </View>
   );
 }
@@ -209,7 +217,7 @@ function Running({ job, theme, styles, onCancel }: { job: Job; theme: PluginThem
       <View style={{ height: 6, borderRadius: 3, backgroundColor: c.surface2, overflow: "hidden" }}>
         <View style={{ height: 6, width: `${job.pct ?? 5}%`, backgroundColor: c.accent }} />
       </View>
-      <Pressable accessibilityRole="button" accessibilityLabel="Cancel" onPress={onCancel} style={{ alignSelf: "flex-start" }}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Cancel" onPress={onCancel} style={{ alignSelf: "flex-start", minHeight: 48, paddingHorizontal: 12, justifyContent: "center" }}>
         <Text style={{ color: c.statusDanger, fontSize: 13 }}>Cancel</Text>
       </Pressable>
     </View>

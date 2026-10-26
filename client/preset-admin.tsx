@@ -46,10 +46,10 @@ export function PresetAdmin({ theme, styles, sel, busy }: { theme: PluginTheme; 
   useEffect(() => { if (!busy && open) void refresh(); }, [busy, open]);
   const pending = busy || renameAction.isPending || importAction.isPending || exportAction.isPending;
   const text = { color: c.foreground, fontSize: 14, lineHeight: 20 };
-  const input = { ...text, borderWidth: 1, borderColor: c.border, borderRadius: 8, padding: 8, backgroundColor: c.surface2 };
+  const input = { ...text, fontSize: 16, minHeight: 48, borderWidth: 1, borderColor: c.border, borderRadius: 8, padding: 8, backgroundColor: c.surface2 };
   const button = (label: string, action: () => void, disabled = false) => (
     <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={action}
-      style={({ pressed, hovered, focused }: { pressed: boolean; hovered?: boolean; focused?: boolean }) => ({ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: focused ? c.accent : c.border, backgroundColor: pressed || hovered ? c.surface2 : "transparent", opacity: disabled ? 0.45 : 1 })}>
+      style={({ pressed, hovered, focused }: { pressed: boolean; hovered?: boolean; focused?: boolean }) => ({ minHeight: 48, maxWidth: "100%", justifyContent: "center", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: focused ? c.accent : c.border, backgroundColor: pressed || hovered ? c.surface2 : "transparent", opacity: disabled ? 0.45 : 1 })}>
       <Text style={{ color: c.accent, fontSize: 14, lineHeight: 20, fontWeight: "600" }}>{label}</Text>
     </Pressable>
   );

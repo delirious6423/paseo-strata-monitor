@@ -6,7 +6,7 @@ import type { BenchOptions, TuneOptions } from "../shared/options";
 export function OptionSection({ title, theme, children }: { title: string; theme: PluginTheme; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return <View style={{ gap: 8 }}>
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)} style={{ minHeight: 48, justifyContent: "center" }}>
       <Text style={{ color: theme.colors.accent, fontSize: 14 }}>{open ? "Hide" : "Show"} {title}</Text>
     </Pressable>
     {open ? children : null}
@@ -24,13 +24,13 @@ export function Field({ label, value, onChange, theme, disabled, numeric = false
     <TextInput accessibilityLabel={label} value={numeric ? draft : value} onChangeText={v => { setDraft(v); onChange(v); }} editable={!disabled}
       keyboardType={numeric ? "numeric" : "default"} autoCapitalize="none" autoCorrect={false} multiline={multiline}
       style={{ color: c.foreground, backgroundColor: c.surface2, borderColor: c.border, borderWidth: 1, borderRadius: 8,
-        padding: 8, fontSize: 14, minHeight: multiline ? 96 : 40, opacity: disabled ? 0.45 : 1 }} />
+        padding: 12, fontSize: 16, minHeight: multiline ? 96 : 48, opacity: disabled ? 0.45 : 1 }} />
   </View>;
 }
 export function Toggle({ label, value, onChange, theme, disabled }: {
   label: string; value: boolean; onChange: (b: boolean) => void; theme: PluginTheme; disabled: boolean;
 }) {
-  return <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+  return <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 48 }}>
     <Switch accessibilityLabel={label} value={value} onValueChange={onChange} disabled={disabled} />
     <Text style={{ color: theme.colors.foreground, fontSize: 14, flexShrink: 1 }}>{label}</Text>
   </View>;
@@ -43,7 +43,7 @@ export function Choices<T extends string>({ label, value, values, onChange, them
     <View accessibilityRole="radiogroup" accessibilityLabel={label} style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
       {values.map((v) => <Pressable key={v} accessibilityRole="radio" accessibilityLabel={`${label}: ${v}`}
         accessibilityState={{ checked: value === v, disabled }} disabled={disabled} onPress={() => onChange(v)}
-        style={{ borderColor: v === value ? c.accent : c.border, borderWidth: 1, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 12,
+        style={{ minHeight: 48, maxWidth: "100%", justifyContent: "center", borderColor: v === value ? c.accent : c.border, borderWidth: 1, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 12,
           backgroundColor: v === value ? c.surface2 : "transparent", opacity: disabled ? 0.45 : 1 }}>
         <Text style={{ color: c.foreground, fontSize: 14 }}>{v}</Text></Pressable>)}
     </View>

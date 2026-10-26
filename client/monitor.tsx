@@ -1,10 +1,11 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import type { Snapshot } from "../shared/strata";
 import { Controls } from "./control";
 import { useStrata } from "./snapshot";
+import { Section } from "./section";
 
 const HISTORY = 60;
 
@@ -22,14 +23,16 @@ function Bar({ value, color, track }: { value: number; color: string; track: str
 }
 
 export const makeStyles = (c: PluginTheme["colors"], compact: boolean) => ({
+  compact,
+  stack: { gap: compact ? 12 : 16 },
   screen: { flex: 1, backgroundColor: c.surface0 },
-  body: { padding: compact ? 16 : 24, gap: compact ? 12 : 16 },
-  card: { padding: 14, gap: 8, borderRadius: 10, backgroundColor: c.surface1 },
-  title: { color: c.foreground, fontSize: compact ? 18 : 20, fontWeight: "600" as const },
-  big: { color: c.foreground, fontSize: compact ? 36 : 44, fontWeight: "600" as const },
-  label: { color: c.foregroundMuted, fontSize: 13 },
-  value: { color: c.foreground, fontSize: 14 },
-  row: { flexDirection: "row" as const, justifyContent: "space-between" as const, gap: 12 },
+  body: { padding: compact ? 12 : 24, gap: compact ? 12 : 16, width: "100%" as const, maxWidth: 960, alignSelf: "center" as const },
+  card: { padding: compact ? 12 : 24, gap: compact ? 8 : 16, borderRadius: 16, backgroundColor: c.surface1, minWidth: 0 },
+  title: { color: c.foreground, fontSize: compact ? 16 : 20, fontWeight: "600" as const },
+  big: { color: c.foreground, fontSize: compact ? 30 : 36, fontWeight: "600" as const },
+  label: { color: c.foregroundMuted, fontSize: 14, lineHeight: 20, flexShrink: 1 },
+  value: { color: c.foreground, fontSize: compact ? 14 : 16, lineHeight: compact ? 20 : 24, flexShrink: 1 },
+  row: { flexDirection: "row" as const, flexWrap: "wrap" as const, justifyContent: "space-between" as const, gap: 12 },
 });
 export type Styles = ReturnType<typeof makeStyles>;
 
@@ -49,25 +52,15 @@ export function Monitor({ theme, layout, openSettings }: PluginScreenProps & { o
   const c = theme.colors;
   const styles = useMemo(() => makeStyles(c, layout.compact), [c, layout.compact]);
 
-  const controls = <Controls theme={theme} styles={styles} openSettings={openSettings} />;
-  if (!data) {
-    return (
-      <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
-        {controls}
-        <Text style={styles.label}>{error ? `Error: ${error.message}` : "Connecting…"}</Text>
-      </ScrollView>
-    );
-  }
-  if (!data.online) {
-    return (
-      <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
-        {controls}
-        <Text style={styles.title}>Strata server is offline</Text>
-        <Text style={styles.label}>{data.error}</Text>
-      </ScrollView>
-    );
-  }
-  return <Online data={data} history={history} styles={styles} colors={c} controls={controls} />;
+  return <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
+    {data?.online ? <Online data={data} history={history} styles={styles} theme={theme} /> : null}
+    <Controls theme={theme} styles={styles} openSettings={openSettings} />
+    {data?.online ? <Diagnostics data={data} styles={styles} theme={theme} /> :
+      <View style={styles.card}>
+        <Text style={styles.title}>{data ? "Server offline" : "Connecting…"}</Text>
+        <Text style={styles.label}>{error ? `Error: ${error.message}` : data?.error ?? "Checking the Strata server."}</Text>
+      </View>}
+  </ScrollView>;
 }
 
 function Stat({ styles, label, value }: { styles: Styles; label: string; value: string }) {
@@ -80,13 +73,12 @@ function Stat({ styles, label, value }: { styles: Styles; label: string; value: 
 }
 
 function Online({
-  data, history, styles, colors, controls,
-}: { data: Snapshot; history: number[]; styles: Styles; colors: PluginTheme["colors"]; controls: ReactNode }) {
+  data, history, styles, theme,
+}: { data: Snapshot; history: number[]; styles: Styles; theme: PluginTheme }) {
+  const colors = theme.colors;
   const peak = Math.max(10, ...history);
   const busy = data.state === "generating";
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.body}>
-      {controls}
       <View style={styles.card}>
         <Text style={styles.title}>{data.model ?? "Strata"}</Text>
         <Text style={styles.label}>
@@ -129,7 +121,14 @@ function Online({
         <Stat styles={styles} label="Context" value={fmt(data.maxContext)} />
       </View>
 
-      <View style={styles.card}>
+  );
+}
+
+function Diagnostics({ data, styles, theme }: { data: Snapshot; styles: Styles; theme: PluginTheme }) {
+  const colors = theme.colors;
+  return <View style={styles.card}>
+      <Section title="Hardware and request history" hint="Memory, utilization and recent requests" theme={theme} compact={styles.compact}>
+      <View style={{ gap: 16 }}>
         <Text style={styles.title}>Hardware</Text>
         <Stat styles={styles} label="GPU" value={`${fmt(data.gpu.util, 0, "%")} · ${fmt(data.gpu.tempC, 0, "°C")} · ${fmt(data.gpu.powerW, 0, " W")}`} />
         <Bar value={pct(data.gpu.memUsed, data.gpu.memTotal)} color={colors.accent} track={colors.surface2 ?? colors.border} />
@@ -139,14 +138,14 @@ function Online({
         <Stat styles={styles} label="CPU" value={fmt(data.gpu.cpu, 0, "%")} />
       </View>
 
-      <View style={styles.card}>
+      <View style={{ gap: 16 }}>
         <Text style={styles.title}>Totals</Text>
         <Stat styles={styles} label="Requests" value={fmt(data.totals.requests)} />
         <Stat styles={styles} label="Prompt tokens" value={fmt(data.totals.promptTokens)} />
         <Stat styles={styles} label="Output tokens" value={fmt(data.totals.outputTokens)} />
       </View>
 
-      <View style={styles.card}>
+      <View style={{ gap: 16 }}>
         <Text style={styles.title}>Recent requests</Text>
         {data.recent.length === 0 ? <Text style={styles.label}>None yet</Text> : null}
         {data.recent.map((r, i) => (
@@ -158,6 +157,6 @@ function Online({
           />
         ))}
       </View>
-    </ScrollView>
-  );
+      </Section>
+      </View>;
 }

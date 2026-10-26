@@ -1,5 +1,75 @@
 # Progress
 
+## Publication approved (2026-10-26)
+
+User: “push to github.” Publication scope: compact mobile UI, its VM regressions, refreshed documentation
+and five current screenshots. Pre-push TypeScript/diff checks pass; local HEAD and origin/main were aligned.
+Latest disposable-VM run passed 18/18 with zero page errors; owned VM is FROZEN and its lease released.
+Earlier no-push notes below describe their checkpoints, not this later authorization.
+
+## Fresh screenshot capture (2026-10-26)
+
+User: “Take updated screenshot and update.” Ran `bash tests/vm/dashboard-ui.sh` against the current tree:
+**18/18 PASS**, zero page errors. Inspected desktop/Air captures and replaced all five README dashboard images.
+Evidence: `/mnt/data4tb/strata-dashboard-tests/20261026-120905/`; `/tmp/strata-screenshot-refresh.log`.
+Updated README caption/evidence and TESTING provenance. No application code changed or live model touched.
+Cleanup independently checked: owned `df-warm-0033aacf-1` FROZEN, lease absent; controller exited.
+No commit/push for this refresh.
+
+## iPhone Air density follow-up (2026-10-26)
+
+User screenshot feedback: previous mobile pass was too large. Mobile-only card padding 16→12,
+internal gaps 16→8, section gaps 16→12, model title 18→16, task titles 16→14 and hints 14→12.
+Primary controls remain at least 44px; editable fields remain 16px. Desktop layout unchanged;
+system text scaling stays enabled. Expanded/collapsed state and drafts still preserved.
+
+`bash tests/vm/dashboard-ui.sh`: **18/18 PASS**, zero browser errors, including 420×912 Air-sized
+viewport and existing 320/390/1280px checks. Air fixture model card 293px, collapsed task 78px.
+Evidence `/mnt/data4tb/strata-dashboard-tests/20261026-120431/` (phone-air.png inspected);
+log `/tmp/strata-compact-air.log`. TypeScript/diff PASS. Controller exited; owned VM reset/frozen,
+lease released. Only strata-monitor reloaded, response running. Native iPhone acceptance still
+not performed; prior native platform gaps apply. No real model operations, commit or push.
+
+## Documentation refresh (2026-10-26)
+
+- README starts with a current VM screenshot and is reorganized around install, features, use, safety and guides.
+- Added current desktop/phone light/dark demo assets plus a 420×912 Air-sized view; refreshed phone captures
+  from the 18-check compact follow-up. Preserved original 0.2.0 images and labeled provenance.
+- Updated every Markdown document, including current-change notes and a new operations/recovery/storage guide.
+  Corrected the exact 30-field inventory, benchmark contracts, backup policy and historical/current acceptance labels.
+- Independent source-fact review found no implementation-contract blockers; its test-count, asset-caption and
+  task-navigation wording corrections were applied.
+- PASS: all 10 Markdown files / 79 link-image references and heading anchors; all eight unique external URLs
+  return HTTP 200. Five PNGs match the latest VM source bytes (desktop 1280×900, phone 390×844, Air-sized 420×912).
+  `npm run typecheck` and `git diff --check` pass. No app workload started for these documentation edits.
+- Preserved and documented the separately accepted mobile-UI follow-up. The earlier expanded-dashboard
+  implementation was published as
+  [commit 69043fa](https://github.com/delirious6423/paseo-strata-monitor/commit/69043fa1bf994fb7830b07f36d7ac588658cac0f).
+
+## Mobile UX pass (2026-10-26)
+
+- Selected model and Load/Stop replace the always-expanded model inventory. Change model opens a
+  grouped picker and closes on selection. Unknown runtime state now says unknown, not stopped.
+- Separate collapsed task cards: tuning/benchmarks, configuration/presets, activity/updates, and
+  model details/discovery. Active jobs/Cancel and action errors remain outside collapsed sections.
+- Live speed appears first when online; hardware/history is optional. Bounded desktop width,
+  larger spacing, 48px primary/form actions, and 16px editable inputs for mobile.
+- Task sections retain mounted form drafts. VM regression exposed and fixed the old online/offline
+  screen remount that reset tuning choices and expanded panels when loading/stopping.
+- No dependencies or backend changes. Concurrent README edits are another session's work; preserved.
+- Final acceptance: **17/17 PASS**, real Paseo + Brave in the owned Linux x64 VM, including online
+  320px geometry/state retention, 390px light/dark, desktop themes, expanded forms, existing workflows;
+  zero browser page errors. `npm run typecheck` and `git diff --check` PASS.
+- Evidence: `/mnt/data4tb/strata-dashboard-tests/20261026-115258/`; controller log
+  `/tmp/strata-mobile-ui-verified.log`. Inspected desktop, phone and online narrow-phone captures.
+- Earlier added-test failures were assumptions about RN Web aria output and the fixture's generating
+  (not idle) state; final assertions check retained mode text and real online metrics.
+- Cleanup verified: controller exited, df-warm-0033aacf-1 reset/frozen, lease absent. Only strata-monitor
+  reloaded; response running. No daemon restart, real model actions, commit or push.
+- Native iOS/Android and other desktop OS/architecture UI acceptance remain BLOCKED (no configured
+  native UI harness used here); Linux browser viewport checks do not establish native acceptance.
+
+
 ## 2026-10-26: Astra/Opus findings fixed; plugin reloaded
 
 User: “Fix every listed issue.” All original findings and follow-up findings addressed. Earlier blanket
@@ -61,8 +131,10 @@ launch-config mutation, preset mutation or backup deletion on the host for these
 
 All owned test runs stopped/discarded or reset/released to frozen harness warm pools. ARM cleanup independently
 verified after each platform: only stopped bases remain; Windows run absent, owned QEMU gone, goldens intact.
-Local edits only; no commit/push requested or performed. Native non-Linux GUI and real-engine/GPU acceptance
-remain untested, not implied by fixture or isolated function checks.
+This implementation was subsequently committed and pushed with user approval as
+[commit 69043fa](https://github.com/delirious6423/paseo-strata-monitor/commit/69043fa1bf994fb7830b07f36d7ac588658cac0f);
+the remote SHA matched local HEAD and the working tree was clean at publication. Newer docs/mobile-UI work is separate.
+Native non-Linux GUI and real-engine/GPU acceptance remain untested, not implied by fixture or isolated function checks.
 
 ### Earlier work
 
