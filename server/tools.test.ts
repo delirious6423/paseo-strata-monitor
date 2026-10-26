@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Job } from "../shared/tools.ts";
 import { serverUrl } from "./control.ts";
-import { benchLines, readCheck, readPresetStatus, speedChange, tuneReport, updateEvent } from "./tools.ts";
+import { benchOutcome, benchLines, readCheck, readPresetStatus, speedChange, tuneReport, updateEvent } from "./tools.ts";
 
 test("benchmark summary: one line per measured phase, warmup left out", () => {
   const lines = benchLines({ phases: [
@@ -24,7 +24,7 @@ test("autotune report: state and wording from Strata's result, exit code and the
   assert.equal(improved.outcome, "Faster settings found and saved");
   assert.match(improved.details[1]!, /uses it at every start/);
   const same = tuneReport({ outcome: "default_confirmed", message: "Nothing was changed." }, 0, false, ["std"]);
-  assert.equal(same.outcome, "Your current settings are already the fastest");
+  assert.equal(same.outcome, "No faster settings found in this search");
   assert.match(same.details[1]!, /nothing changes at start/);
   // Strata can find faster settings and fail to save them (PresetError): never claim "saved".
   assert.equal(tuneReport({ outcome: "improved" }, 0, false, []).outcome, "Faster settings found, but no preset was saved");
@@ -38,6 +38,17 @@ test("autotune report: state and wording from Strata's result, exit code and the
   assert.equal(tuneReport(null, 130, true, []).outcome, "Cancelled before anything was saved");
   assert.match(tuneReport(null, 130, true, ["late"]).outcome!, /after preset "late" was saved/);
   assert.match(tuneReport(null, null, true, null).outcome!, /could not be checked/);
+});
+
+test("autotune reports search scope and skipped settings without claiming optimality", () => {
+  const report = tuneReport({ outcome: "default_confirmed", message: "Already fastest", mode: "thorough",
+    per_request: [{}, {}, {}, {}], arms: [{}, {}],
+    skipped: [{ label: "Speculative window", reason: "small answer differences not allowed" }],
+  }, 0, false, []);
+  assert.equal(report.outcome, "No faster settings found in this search");
+  assert.match(report.details[0]!, /does not prove/);
+  assert.match(report.details[1]!, /Thorough search: 4 request-setting trials, 2 restart candidates, 1 skipped/);
+  assert.match(report.details[2]!, /small answer differences not allowed/);
 });
 
 test("benchmark URL: IPv6 hosts in brackets, wildcard hosts as loopback", () => {
@@ -202,6 +213,13 @@ test("before/after speed: mean of the repeats per kind; changes inside the runs'
   // A kind missing on one side, or no numbers, is left out rather than compared wrongly.
   assert.deepEqual(speedChange(run([60], []), run([], [9])), []);
   assert.deepEqual(speedChange({}, run([1], [1])), []);
+});
+
+test("standard protocol outcomes do not mislabel nonconformance as failed requests", () => {
+  assert.equal(benchOutcome(false, "nonconforming"), "Finished; protocol nonconforming");
+  assert.equal(benchOutcome(false, "partial"), "Finished; protocol incomplete");
+  assert.equal(benchOutcome(false, null), "Finished with failed requests");
+  assert.equal(benchOutcome(true, "complete"), "Finished");
 });
 
 test("saved tuning status: Strata's presets status -> the screen's list", () => {

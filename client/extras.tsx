@@ -22,7 +22,7 @@ const STATE = {
 
 /** The saved tunes for the selected model (Strata's presets): which one starts with the model, and switch off,
  * undo, use another, delete, or re-check. Changes take effect at the model's next start. */
-export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styles: Styles; sel: Engine; busy: boolean }) {
+export function Presets({ theme, styles, sel, busy, mutationBusy = busy }: { theme: PluginTheme; styles: Styles; sel: Engine; busy: boolean; mutationBusy?: boolean }) {
   const c = theme.colors;
   const client = useQueryClient();
   const status = useRpc(strataPresets);
@@ -85,18 +85,18 @@ export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styl
             </Text>
           ) : null}
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
-            {!p.active ? link(theme, "Use this one", () => act.mutate({ action: "apply", preset: p.id }), { disabled: act.isPending || busy }) : null}
+            {!p.active ? link(theme, "Use this one", () => act.mutate({ action: "apply", preset: p.id }), { disabled: act.isPending || mutationBusy }) : null}
             {link(theme, confirm === `recheck:${p.id}` ? "Press again: stops the model, ~2 min" : "Re-check",
               () => twice(`recheck:${p.id}`, () => check.mutate(p.id)), { disabled: check.isPending || busy })}
             {link(theme, confirm === `delete:${p.id}` ? "Press again to delete" : "Delete",
-              () => twice(`delete:${p.id}`, () => act.mutate({ action: "delete", preset: p.id })), { disabled: act.isPending || busy, danger: true })}
+              () => twice(`delete:${p.id}`, () => act.mutate({ action: "delete", preset: p.id })), { disabled: act.isPending || mutationBusy, danger: true })}
           </View>
         </View>
       ))}
       {data && data.presets.length ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
-          {active ? link(theme, "Switch off", () => act.mutate({ action: "off" }), { disabled: act.isPending || busy }) : null}
-          {data.canUndo ? link(theme, "Undo last change", () => act.mutate({ action: "undo" }), { disabled: act.isPending || busy }) : null}
+          {active ? link(theme, "Switch off", () => act.mutate({ action: "off" }), { disabled: act.isPending || mutationBusy }) : null}
+          {data.canUndo ? link(theme, "Undo last change", () => act.mutate({ action: "undo" }), { disabled: act.isPending || mutationBusy }) : null}
         </View>
       ) : null}
       {act.error || check.error ? <Text style={{ color: c.statusDanger, fontSize: 12 }}>{(act.error ?? check.error)?.message}</Text> : null}
@@ -104,12 +104,12 @@ export function Presets({ theme, styles, sel, busy }: { theme: PluginTheme; styl
   );
 }
 
-/** The last lines of the selected model's server log; opens by itself when the model failed to start. */
+/** The selected model's server log stays collapsed, including after a failed start. */
 export function ServerLog({ theme, styles, sel }: { theme: PluginTheme; styles: Styles; sel: Engine }) {
   const c = theme.colors;
   const log = useRpc(strataLog);
   const [open, setOpen] = useState(false);
-  useEffect(() => setOpen(sel.state === "failed"), [sel.id, sel.state === "failed"]);
+  useEffect(() => setOpen(false), [sel.id]);
   const live = sel.state === "loading" || sel.state === "stopping";
   const { data, error } = useQuery({ queryKey: ["strata-log", sel.id], queryFn: () => log({ id: sel.id }), enabled: open,
     refetchInterval: open && live ? 3000 : false });

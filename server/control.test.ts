@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { configure, listEngines, loadEngine, stopEngine } from "./control.ts";
+import { createModelConfigService } from "./model-config.ts";
 
 // A machine with one systemd-run model and a fake `systemctl` on PATH: it logs every call, keeps the unit's
 // state in a file, and is slow on reset-failed (the window between Load's last check and its start).
@@ -22,7 +23,7 @@ case "$*" in
   *reset-failed*) sleep 1 ;;
   *start*) echo active > "${state}" ;;
   *" stop "*) echo inactive > "${state}" ;;
-  *show*) echo "Id=strata-test.service"; echo "ActiveState=$(cat "${state}" 2>/dev/null || echo inactive)"; echo "Result=success"; echo "InactiveExitTimestamp=" ;;
+  *show*) [ ! -f "${join(home, "status-fails")}" ] || exit 1; echo "Id=strata-test.service"; echo "ActiveState=$(cat "${state}" 2>/dev/null || echo inactive)"; echo "Result=success"; echo "InactiveExitTimestamp=" ;;
 esac
 `);
 chmodSync(join(bin, "systemctl"), 0o755);
@@ -61,4 +62,17 @@ test("systemd: one Stop cancels every Load requested before it; a later Load sta
   assert.match(calls(), /start --no-block -- strata-test\.service/);
   await stopEngine(id);
   await settle();
+});
+
+test("systemd: failed status collection is unknown and refuses configuration save", { skip: !linux }, async () => {
+  setup();
+  const service = createModelConfigService();
+  const original = readFileSync(join(home, "m.json"), "utf8");
+  const draft = await service.read({ id });
+  writeFileSync(join(home, "status-fails"), "");
+  try {
+    assert.equal((await listEngines(true)).engines[0]?.state, "unknown");
+    await assert.rejects(service.save(draft), /Stop all models/);
+    assert.equal(readFileSync(join(home, "m.json"), "utf8"), original);
+  } finally { rmSync(join(home, "status-fails")); }
 });

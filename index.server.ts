@@ -1,4 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createModelConfigService } from "./server/model-config";
+import { registerPresetAdmin } from "./server/preset-admin";
+import { strataModelConfig, strataSaveModelConfig } from "./shared/model-config";
 import { configure, engineLog, knownPorts, listEngines, loadEngine, stopEngine } from "./server/control";
 import { configureIdle, startIdle, stopIdle } from "./server/idle";
 import { configureEndpoints, getSnapshot } from "./server/strata";
@@ -14,6 +17,10 @@ import {
 } from "./shared/tools";
 
 export default function contribute(server: PluginServerContext) {
+  const config = createModelConfigService();
+  server.handle(strataModelConfig, config.read);
+  server.handle(strataSaveModelConfig, config.save);
+  registerPresetAdmin(server);
   startTools(); // a reload into the same module instance starts with the tools usable again
   const settings = server.registerSettings(discoverySettings);
   const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
@@ -38,8 +45,8 @@ export default function contribute(server: PluginServerContext) {
   });
   const ok = { ok: true as const };
   server.handle(strataTools, () => toolsStatus());
-  server.handle(strataBench, async ({ id }) => (await startBench(id), ok));
-  server.handle(strataTune, async ({ id, mode }) => (await startTune(id, mode), ok));
+  server.handle(strataBench, async ({ id, options }) => (await startBench(id, options), ok));
+  server.handle(strataTune, async ({ id, mode, options }) => (await startTune(id, mode, options), ok));
   server.handle(strataUpdateCheck, () => checkUpdate(true));
   server.handle(strataUpdate, async () => (await startUpdate(), ok));
   server.handle(strataCancel, async () => (await cancelJob(), ok));

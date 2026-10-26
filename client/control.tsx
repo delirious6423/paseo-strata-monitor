@@ -108,18 +108,19 @@ export function Controls({ theme, styles, openSettings }: { theme: PluginTheme; 
   const elsewhere = data.elsewhere; // the server decides, with the same rule Load uses
   const sel = data.engines.find((e) => e.id === picked) ?? running ?? groupEngines(data.engines)[0]!.engines[0]!;
   const other = running && running.id !== sel.id ? running : null;
-  const kind: "load" | "stop" = sel.state === "loading" || sel.state === "ready" ? "stop" : "load";
+  const kind: "load" | "stop" = sel.state === "loading" || sel.state === "ready" || sel.state === "unknown" ? "stop" : "load";
   const label =
     action.isPending ? "Working…"
     : sel.state === "stopping" ? "Stopping…"
     : sel.state === "loading" ? "Abort"
+    : sel.state === "unknown" ? "Stop / recover unknown model"
     : sel.state === "ready" ? "Stop"
     : elsewhere.length ? "Another Strata server is running"
     : other ? "Switch to this model"
     : "Load";
   const disabled = action.isPending || sel.state === "stopping" || (kind === "load" && elsewhere.length > 0);
   const danger = kind === "stop";
-  const dot = { ready: c.statusSuccess, loading: c.statusWarning, stopping: c.statusWarning, failed: c.statusDanger, stopped: c.border };
+  const dot = { ready: c.statusSuccess, loading: c.statusWarning, stopping: c.statusWarning, failed: c.statusDanger, unknown: c.statusDanger, stopped: c.border };
 
   return (
     <View style={styles.card}>

@@ -120,8 +120,10 @@ function cli(install: string): string {
 function savedProfileSource(name: string): string | null {
   try {
     const p = JSON.parse(readFileSync(join(profileDir(os), `${name}.json`), "utf8"));
-    return typeof p.source_config === "string" ? p.source_config : null;
+    if (typeof p.source_config !== "string" || !p.source_config) throw new Error("Invalid saved profile");
+    return p.source_config;
   } catch {
+    if (existsSync(join(profileDir(os), `${name}.json`))) throw new Error("Cannot read the saved Strata profile; model state is unknown");
     return null;
   }
 }
@@ -129,12 +131,13 @@ function savedProfileSource(name: string): string | null {
 async function runtimeState(f: Found & { launcher: { kind: "strata" } }): Promise<{ state: Engine["state"]; error: string | null }> {
   const name = profileName(f);
   if (!savedProfileSource(name)) return { state: "stopped", error: null };
-  const r = json(await strata(f.launcher.install, ["runtime", "status", "--profile", name, "--output", "json"]).catch(() => "{}"));
+  const r = json(await strata(f.launcher.install, ["runtime", "status", "--profile", name, "--output", "json"]));
   const s = r.state;
   if (s === "ready") return { state: "ready", error: null };
   if (s === "starting") return { state: "loading", error: null };
-  if (s === "failed" || s === "stale") return { state: "failed", error: String(r.error ?? r.message ?? s).slice(0, 300) };
-  return { state: "stopped", error: null };
+  if (s === "failed") return { state: "failed", error: String(r.error ?? r.message ?? s).slice(0, 300) };
+  if (s === "stopped" && r.ok === true) return { state: "stopped", error: null };
+  return { state: "unknown", error: "Strata runtime status could not establish the model state" };
 }
 
 async function ensureProfile(f: Found & { launcher: { kind: "strata" } }): Promise<string> {
@@ -200,13 +203,17 @@ async function listNow(rescan: boolean): Promise<Listing> {
       if (f.launcher.kind === "systemd") {
         const u = show.get(f.launcher.unit);
         const active = u?.activeState === "active" || u?.activeState === "activating";
+        if (!u || !["active", "activating", "deactivating", "failed", "inactive"].includes(u.activeState)) {
+          state = "unknown";
+          error = "Systemd status could not establish the model state";
+        }
         if (active) state = (await answers(f)) ? "ready" : "loading";
         else if (u?.activeState === "deactivating") state = "stopping";
         else if (u?.activeState === "failed") state = "failed";
         sinceMs = active ? (u?.sinceMs ?? null) : null;
         if (state === "failed") error = (await lastLog(f.launcher.unit)) ?? `exit: ${u?.result}`;
       } else {
-        ({ state, error } = await runtimeState(f as Found & { launcher: { kind: "strata" } }).catch((e) => ({ state: "failed" as const, error: String(e.message ?? e) })));
+        ({ state, error } = await runtimeState(f as Found & { launcher: { kind: "strata" } }).catch((e) => ({ state: "unknown" as const, error: String(e.message ?? e) })));
       }
       if (stopping.has(f.id)) state = "stopping"; // cleared when `runtime stop` returns
       if (stopErrors.has(f.id) && state !== "stopped") error = `Stop failed: ${stopErrors.get(f.id)}`;
@@ -216,7 +223,7 @@ async function listNow(rescan: boolean): Promise<Listing> {
       };
     }),
   );
-  return { engines, places: d.places, elsewhere: await elsewhere(engines) };
+  return { engines, places: d.places, elsewhere: await elsewhere(engines, rescan) };
 }
 
 async function find(id: string): Promise<Found> {
@@ -236,7 +243,7 @@ async function stopNow(f: Found): Promise<void> {
 
 // One load/stop at a time (several clients may press buttons), and Stop cancels a Load still preparing.
 let queue: Promise<unknown> = Promise.resolve();
-const exclusive = <T>(task: () => Promise<T>): Promise<T> => {
+export const exclusive = <T>(task: () => Promise<T>): Promise<T> => {
   const next = queue.then(task, task);
   queue = next.catch(() => {});
   return next;
@@ -345,6 +352,7 @@ async function load(id: string, aborted: () => boolean, forTool = false): Promis
   const f = await find(id);
   const { engines } = await listNow(false); // fresh, not the shared cache
   const active = engines.filter(owns);
+  if (engines.find(e => e.id === id)?.state === "unknown") throw new Error("Model state is unknown. Use Stop / recover unknown model, then search again before loading.");
   const foreign = await elsewhere(engines, true);
   if (foreign.length) throw new Error(`A Strata server this plugin did not start is running at ${foreign.map((s) => s.url).join(", ")}; stop it first (one model at a time)`);
   // Blocking: the next model's port and GPU need the old one fully gone. A failed stop aborts the load.

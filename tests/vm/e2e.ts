@@ -3,7 +3,7 @@
 // (Strata settings file, an install elsewhere, GGUF files; on Linux also a user systemd template unit), with
 // the fake Strata CLI/server from fake-strata/. Prints PASS/FAIL per check; exit code = number of failures.
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,6 +16,7 @@ import {
   cancelJob, changePreset, checkUpdate, presetStatus, startBench, startRecheck, startRollback, startTune, startUpdate, toolsStatus,
 } from "../../server/tools";
 import { groupEngines } from "../../shared/group";
+import { createModelConfigService } from "../../server/model-config";
 
 const win = process.platform === "win32";
 const linux = process.platform === "linux";
@@ -134,6 +135,18 @@ await stopEngine(bigId);
 check("stop reaches stopped", await until(bigId, "stopped", 30), await state(bigId));
 await sleep(1000);
 check("no Strata listener left", (await strataListeners()).length === 0, await strataListeners());
+const configService = createModelConfigService();
+const draft = await configService.read({ id: tinyId });
+const originalConfig = readFileSync(tiny!.config, "utf8");
+writeFileSync(join(home, ".fake-strata-runtime-status-fails"), "");
+try {
+  const unknown = (await listEngines(true)).engines.find(e => e.id === tinyId)?.state;
+  const refusedSave = await configService.save(draft).then(() => "", e => String(e.message));
+  const refusedLoad = await loadEngine(tinyId).then(() => "", e => String(e.message));
+  check("unknown model Load refuses with recovery guidance instead of a successful no-op", /Stop \/ recover/.test(refusedLoad), refusedLoad);
+  check("failed runtime status is unknown and refuses config save without changing bytes", unknown === "unknown" && /Stop all models/.test(refusedSave) && readFileSync(tiny!.config, "utf8") === originalConfig, [unknown, refusedSave]);
+} finally { rmSync(join(home, ".fake-strata-runtime-status-fails")); }
+await listEngines(true);
 
 await loadEngine(tinyId);
 await sleep(300);
@@ -155,8 +168,11 @@ check("abort while the load is still preparing: nothing starts", (await until(bi
   [await state(tinyId), await state(bigId), await strataListeners()]);
 
 // A Strata server this plugin did not start (another profile, a terminal) holds the GPU: Load refuses.
+await listEngines(true); // cache an empty foreign-listener scan
 const stranger = spawn(process.execPath, [join(app, "serve", "server.py"), "--config", join(app, "strata-tiny.json"), "--port", "18555"], { stdio: "ignore" });
 await sleep(3000);
+const freshListing = await listEngines(true);
+check("fresh listing sees a newly started foreign server despite cached empty listeners", freshListing.elsewhere.some(e => e.url.endsWith(":18555")), freshListing.elsewhere);
 const refused = await loadEngine(tinyId).then(() => "", (e) => String(e.message));
 check("load refuses while a foreign Strata server runs", /did not start/.test(refused) && (await state(tinyId)) === "stopped", refused);
 stranger.kill();
@@ -175,17 +191,31 @@ const u = await checkUpdate(true);
 check("update check: offered versions; the found models would not get the new engine", u.available && u.engine.offered === "9.9.9" && !u.reachesModels, u);
 await loadEngine(tinyId);
 await until(tinyId, "ready", 30);
-await startBench(tinyId);
+await startBench(tinyId, { suite: "parallel-mixed-v1", concurrency: 8, repeat: 2, requestTimeout: 90 });
+const changedDuringBench = await changePreset(tinyId, "off").then(() => true, () => false);
+const blockedDuringBench = await loadEngine(bigId).then(() => "", e => String(e.message));
+check("preset bookkeeping is allowed during benchmark without releasing the Load guard", changedDuringBench && /benchmark is running/.test(blockedDuringBench), blockedDuringBench);
 let job = await waitJob(30);
 check("benchmark of the running model", job?.kind === "bench" && job.state === "done" && job.details.some((d) => /42\.5 tok\/s/.test(d)), job);
-await startTune(tinyId, "quick");
+const benchArgv = JSON.parse(readFileSync(join(homedir(), ".fake-strata-bench-args"), "utf8"));
+check("benchmark options reach CLI", benchArgv.includes("parallel-mixed-v1") && benchArgv.includes("8") && benchArgv.includes("90"));
+const benchCountBeforeMeasurementOnly = readFileSync(join(home, ".fake-strata-bench-count"), "utf8");
+await startTune(tinyId, "thorough", { use: "coding", goal: "reserve", reserveMiB: 1024, leaveRam: 10,
+  allowSmallDifferences: true, allowNotRepeatable: true, minutes: 30, name: "coding preset", save: false });
 await until(tinyId, "stopped", 60); // after the "before" benchmark; Windows: stopping goes through cmd.exe
 const blocked = await loadEngine(bigId).then(() => "", (e) => String(e.message));
 check("autotune measures, stops the running model, and blocks Load", (await state(tinyId)) === "stopped" && /Autotune is running/.test(blocked), [await state(tinyId), blocked]);
 job = await waitJob(120);
-check("autotune result, speed before and after, and the model runs again", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") &&
-  job.details.some((d) => /every start/.test(d)) && job.details.some((d) => /^Speed vs before: One request: 42\.5 → 42\.5 tok\/s/.test(d)) &&
+check("measurement-only tune reloads previous settings without comparison benchmarks", job?.state === "done" && /Faster settings/.test(job.outcome ?? "") &&
+  job.details.some((d) => /Measurement only/.test(d)) && !job.details.some((d) => /^Speed vs before:/.test(d)) &&
+  readFileSync(join(home, ".fake-strata-bench-count"), "utf8") === benchCountBeforeMeasurementOnly &&
   (await state(tinyId)) === "ready", [job, await state(tinyId)]);
+
+check("thorough autotune reaches the CLI without falling back to quick",
+  readFileSync(join(homedir(), ".fake-strata-tune-mode"), "utf8") === "thorough");
+
+const tuneArgv = JSON.parse(readFileSync(join(homedir(), ".fake-strata-tune-args"), "utf8"));
+check("tuning workload/objective/answer permissions reach CLI", ["coding", "room:1024", "--allow-small-differences", "--allow-not-repeatable", "coding preset", "30"].every(v => tuneArgv.includes(v)));
 
 // Cancel while autotune starts the model again: the tune's result stays, only the measurement is skipped.
 await startTune(tinyId, "quick");
@@ -213,6 +243,15 @@ ps = await changePreset(tinyId, "off");
 check("switch off: no preset active, marked switched off", ps.switchedOff && !ps.presets.some((p) => p.active), ps);
 ps = await changePreset(tinyId, "undo");
 check("undo: the preset is active again", ps.presets.find((p) => p.active)?.id === saved?.id, ps);
+const beforePinned = readFileSync(tiny!.config, "utf8");
+writeFileSync(tiny!.config, JSON.stringify({ ...JSON.parse(beforePinned), args_written: ["--spec", "4"], user_args: ["--spec", "4"] }));
+try {
+  const refusedTune = await startTune(tinyId, "quick").then(() => "", e => String(e.message));
+  check("autotune rejects raw pinned overrides even if capture would drop them", /pinned by user_args/.test(refusedTune), refusedTune);
+  await startRecheck(tinyId, saved!.id);
+  const refusedRecheck = await waitJob(30);
+  check("preset recheck rejects pinned overrides before stopping a running model", refusedRecheck?.state === "failed" && /pinned by user_args/.test(refusedRecheck.error ?? "") && (await state(tinyId)) === "ready", refusedRecheck);
+} finally { writeFileSync(tiny!.config, beforePinned); }
 await startRecheck(tinyId, saved!.id);
 job = await waitJob(60);
 check("re-check stops the model and keeps a preset that is still as fast", job?.kind === "recheck" && job.state === "done" &&

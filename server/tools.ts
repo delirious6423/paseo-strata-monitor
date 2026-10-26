@@ -2,9 +2,11 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { benchArgs, benchOptionsSchema, tuneArgs, tuneOptionsSchema, validateTuneGoal, validateTuneOverrides, type BenchOptions, type TuneOptions } from "../shared/options";
 import { type Job, type PresetStatus, type UpdateCheck, jobSchema } from "../shared/tools";
-import { cmdExeLine, discovery, findModel, freeGpu, listEngines, loadForTool, readyModel, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
+import { cmdExeLine, discovery, exclusive, findModel, freeGpu, isBusy, listEngines, loadForTool, readyModel, serverUrl, setBeforeStop, setBusy, strataCommand } from "./control";
 import type { Found } from "./discover";
+import { smallJson } from "./models";
 import { installPlaces } from "./discover";
 import { type Os, cliIn, componentsDir, here, pluginStateDir } from "./places";
 
@@ -167,7 +169,8 @@ const busyName = { bench: "A benchmark", tune: "Autotune", update: "An update", 
 async function startJob(kind: Job["kind"], modelId: string | null, prepare: () => Promise<Found | null>,
     body: (r: Run, f: Found | null, poll: Poll) => Promise<void>) {
   if (run) throw new Error(`${busyName[run.job.kind]} is already running`);
-  if (presetChanging && (kind === "tune" || kind === "recheck")) throw new Error("Saved tuning is being changed; try again in a moment");
+  if (presetChanging) throw new Error("Saved tuning is being changed; try again in a moment");
+  if (isBusy()) throw new Error("Another model operation is running; try again in a moment");
   const job: Job = {
     id: Date.now().toString(36), kind, modelId, model: null, // the model from the press: Stop finds it while preparing
     startedMs: Date.now(), endedMs: null, state: "running", pct: null, message: "Starting…", minutesLeft: null,
@@ -179,7 +182,7 @@ async function startJob(kind: Job["kind"], modelId: string | null, prepare: () =
   const release = () => {
     if (run !== r) return;
     run = null;
-    setBusy(null);
+    setBusy(presetChanging ? "A saved-tuning change" : null);
   };
   let f: Found | null;
   try {
@@ -230,6 +233,8 @@ const n = (v: unknown, digits = 1) => (typeof v === "number" && Number.isFinite(
 
 /** Strata's bench summary -> one line per measured phase. */
 export function benchLines(summary: Record<string, any>): string[] {
+  if (Array.isArray(summary.standard)) return summary.standard.slice(0, 100).map((s: any) =>
+    `${String(s.phase ?? "standard")} · ${String(s.case_id ?? "")}: ${String(s.metric ?? "metric")} median ${n(s.median)} (n=${String(s.n ?? 0)})`);
   const phases = Array.isArray(summary?.phases) ? summary.phases : [];
   return phases
     .filter((p: any) => p && p.kind !== "warmup")
@@ -249,10 +254,13 @@ setBeforeStop(async (id) => {
   if (run === r) throw new Error("The benchmark of this model is still stopping; try again in a moment");
 });
 
-type BenchRun = { summary: Record<string, any>; ok: boolean; path: string | null };
+type BenchRun = { summary: Record<string, any>; ok: boolean; status: string | null; path: string | null };
+export function benchOutcome(ok: boolean, status: string | null): string {
+  return status === "nonconforming" ? "Finished; protocol nonconforming" : status === "partial" ? "Finished; protocol incomplete" : ok ? "Finished" : "Finished with failed requests";
+}
 
 /** One serving-smoke run against the model's server; null when cancelled. `label` prefixes the progress. */
-async function runBench(r: Run, f: Found, install: string, poll: Poll, label: string, last: boolean, repeat = 1): Promise<BenchRun | null> {
+async function runBench(r: Run, f: Found, install: string, poll: Poll, label: string, last: boolean, repeat = 1, options: Partial<BenchOptions> = {}): Promise<BenchRun | null> {
   const job = r.job;
   const out = join(state(), "bench", `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(f.name)}`);
   await mkdir(join(state(), "bench"), { recursive: true, mode: 0o700 });
@@ -263,13 +271,12 @@ async function runBench(r: Run, f: Found, install: string, poll: Poll, label: st
     if (planned && !label) job.pct = Math.round((100 * (p.completed_phases ?? 0)) / planned);
     if (p.current_phase && !r.cancel) job.message = `${label}Measuring: ${p.current_phase}`;
   });
-  const x = await launch(install, ["bench", "run", "--url", serverUrl(f), "--suite", "serving-smoke",
-    "--condition", "paseo", "--repeat", String(repeat), "--out", out, "--output", "json"], jobCtx(r, last));
+  const x = await launch(install, ["bench", "run", "--url", serverUrl(f), ...benchArgs(options, repeat), "--out", out, "--output", "json"], jobCtx(r, last));
   stop();
   const res = lastJson(x.lines);
   if (r.cancel) return null;
-  if (!res?.summary) throw new Error(why(x, res));
-  return { summary: res.summary, ok: !!res.ok, path: typeof res.path === "string" ? res.path : null };
+  if (!res?.summary && !res?.summaries) throw new Error(why(x, res));
+  return { summary: res.summary ?? { standard: res.summaries }, ok: !!res.ok, status: typeof res.status === "string" ? res.status : null, path: typeof res.path === "string" ? res.path : null };
 }
 
 /** Before -> after per kind of phase (one request, several at once): the mean output tok/s of each run's
@@ -317,15 +324,16 @@ async function measure(r: Run, f: Found, install: string, poll: Poll, label: str
   return b;
 }
 
-export async function startBench(id: string) {
+export async function startBench(id: string, input: Partial<BenchOptions> = {}) {
+  const options = benchOptionsSchema.parse(input);
   await startJob("bench", id, () => readyModel(id), async (r, model, poll) => {
     const job = r.job;
     const f = model!;
-    const b = await runBench(r, f, await installFor(f), poll, "", true);
+    const b = await runBench(r, f, await installFor(f), poll, "", true, options.repeat, options);
     if (!b) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled" });
     job.pct = 100;
     job.details = benchLines(b.summary);
-    job.outcome = b.ok ? "Finished" : "Finished with failed requests";
+    job.outcome = benchOutcome(b.ok, b.status);
     if (b.path) job.details.push(`Report: ${b.path}`);
   });
 }
@@ -345,7 +353,15 @@ async function presetNames(install: string, r: Run): Promise<Map<string, string>
 export function tuneReport(result: Record<string, any> | null, code: number | null, cancelled: boolean, saved: string[] | null):
     { state: Job["state"]; outcome: string | null; details: string[]; error: string | null } {
   const outcome = String(result?.outcome ?? "");
-  const details: string[] = typeof result?.message === "string" ? [result.message] : [];
+  const details: string[] = outcome === "default_confirmed"
+    ? ["No faster settings found among those tested; this does not prove the configuration is optimal."]
+    : typeof result?.message === "string" ? [result.message] : [];
+  if (Array.isArray(result?.per_request) || Array.isArray(result?.arms)) {
+    details.push(`${result?.mode === "thorough" ? "Thorough" : "Quick"} search: ${result?.per_request?.length ?? 0} request-setting trials, ${result?.arms?.length ?? 0} restart candidates, ${result?.skipped?.length ?? 0} skipped`);
+    for (const s of Array.isArray(result?.skipped) ? result.skipped : []) {
+      if (typeof s?.label === "string" && typeof s?.reason === "string") details.push(`Skipped ${s.label}: ${s.reason}`);
+    }
+  }
   const savedLine = saved?.length
     ? outcome === "default_confirmed"
       ? `Recorded as preset "${saved[0]}": the standard settings, so nothing changes at start`
@@ -361,23 +377,31 @@ export function tuneReport(result: Record<string, any> | null, code: number | nu
     return { state: "done", outcome: saved?.length ? "Faster settings found and saved" : saved === null
       ? "Faster settings found (could not confirm the preset was saved)" : "Faster settings found, but no preset was saved", details, error: null };
   }
-  if (code === 0 && outcome === "default_confirmed") return { state: "done", outcome: "Your current settings are already the fastest", details, error: null };
+  if (code === 0 && outcome === "default_confirmed") return { state: "done", outcome: "No faster settings found in this search", details, error: null };
   return { state: "failed", outcome: null, details, error: String(result?.message ?? `autotune ended with exit ${code}`).slice(0, 300) };
 }
 
-export async function startTune(id: string, mode: "quick" | "thorough") {
+export async function startTune(id: string, mode: "quick" | "thorough", input: Partial<TuneOptions> = {}) {
+  const options = tuneOptionsSchema.parse(input);
   const status = join(state(), "tune-status.json");
-  await startJob("tune", id, () => findModel(id), async (r, model, poll) => {
+  await startJob("tune", id, async () => {
+    const f = await findModel(id);
+    const config = await smallJson(f.config);
+    validateTuneGoal(config, options);
+    validateTuneOverrides(config);
+    return f;
+  }, async (r, model, poll) => {
     const job = r.job;
     const f = model!;
     const install = await installFor(f);
+    job.details.push(`Requested: ${mode}, ${options.use}, ${options.goal}, RAM reserve ${options.leaveRam}%, small answer differences ${options.allowSmallDifferences ? "on" : "off"}, non-repeatable answers ${options.allowNotRepeatable ? "on" : "off"}, save ${options.save ? "on" : "off"}`);
     await mkdir(state(), { recursive: true, mode: 0o700 });
     await rm(status, { force: true });
     // A model that is running is measured before, and started and measured again after: the screen then shows
     // what the tune changed. One that was not running is left stopped.
     const wasReady = (await listEngines(true)).engines.find((e) => e.id === id)?.state === "ready";
     let before: BenchRun | null = null;
-    if (wasReady) {
+    if (wasReady && options.save) {
       before = await measure(r, f, install, poll, "Speed before: ").catch((e) => {
         job.details.push(`Speed before: not measured (${String(e.message ?? e).slice(0, 120)})`);
         return null;
@@ -394,7 +418,7 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
       if (typeof st.message === "string" && !r.cancel) job.message = st.message;
       job.minutesLeft = typeof st.minutes_left === "number" ? st.minutes_left : null;
     });
-    const x = await launch(install, ["tune", "auto", f.config, "--mode", mode, "--output", "json", "--status-file", status], jobCtx(r, false));
+    const x = await launch(install, ["tune", "auto", f.config, ...tuneArgs(mode, options), "--output", "json", "--status-file", status], jobCtx(r, false));
     stopPoll();
     const cancelled = r.cancel; // a Cancel from here on only skips the "after" measurement
     job.message = "Checking what was saved";
@@ -405,6 +429,10 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
     const named = typeof result?.preset?.name === "string" ? [result.preset.name] : null;
     const saved = named ?? (presetsBefore && presetsAfter ? [...presetsAfter].filter(([k]) => !presetsBefore.has(k)).map(([, v]) => v) : null);
     const rep = tuneReport(result, x.code, cancelled, saved);
+    if (!options.save && rep.state === "done") {
+      if (result?.outcome === "improved") rep.outcome = "Faster settings found (measurement only; not saved)";
+      rep.details.push("Measurement only: the preset was not saved or applied. Future loads keep the previous settings.");
+    }
     const measured = job.details;
     // The tune's result is shown now; the job stays running (and cancellable) while the model is started again
     // and measured, and takes the tune's final state at the end.
@@ -412,7 +440,7 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
     if (rep.state === "failed" && !rep.error) rep.error = job.error = why(x, lastJson(x.lines));
     const finish = () => void Object.assign(job, { state: rep.state, ...(rep.state === "done" ? { pct: 100 } : {}) });
     if (!wasReady) {
-      if (rep.state === "done") job.details.push("Load the model and press Benchmark to measure it with the new settings");
+      if (rep.state === "done") job.details.push(options.save ? "Load the model and press Benchmark to measure it with the new settings" : "Measurement only: the model remains stopped with its previous settings");
       return finish();
     }
     if (cancelled || r.cancel) {
@@ -423,7 +451,7 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
     job.message = "Starting the model again";
     try {
       await loadForTool(id, () => r.cancel);
-      if (before && rep.state === "done") {
+      if (options.save && before && rep.state === "done") {
         // Compared with the settings that ran before (the previous preset, if any); Strata's own gain is against
         // the standard settings, so the two can differ.
         const after = await measure(r, f, install, poll, "Speed after: ").catch((e) => {
@@ -436,7 +464,7 @@ export async function startTune(id: string, mode: "quick" | "thorough") {
           if (lines.length) job.details.push("A rough check: the same quick benchmark a few minutes apart, not a controlled test");
         }
         else if (r.cancel) job.details.push("Speed after: not measured (cancelled or stopped)");
-      } else if (rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
+      } else if (options.save && rep.state === "done" && !r.cancel) job.details.push("Speed after: not compared (no measurement from before)");
     } catch (e) {
       job.details.push(`Not started again: ${String((e as Error).message ?? e).slice(0, 150)}`);
     }
@@ -587,14 +615,25 @@ export async function presetStatus(id: string): Promise<PresetStatus> {
 let presetChanging = false; // Autotune and Re-check refuse to start meanwhile (both write the same store)
 
 export async function changePreset(id: string, action: "off" | "undo" | "apply" | "delete", preset?: string): Promise<PresetStatus> {
-  if (run && (run.job.kind === "tune" || run.job.kind === "recheck")) throw new Error(`${busyName[run.job.kind]} is running; wait for it to finish`);
+  return withPresetMutation(() => changeNow(id, action, preset));
+}
+
+export async function withPresetMutation<T>(fn: () => Promise<T>): Promise<T> {
+  if (disposed) throw new Error("Plugin is unloading");
+  if (run && run.job.kind !== "bench") throw new Error(`${busyName[run.job.kind]} is running; wait for it to finish`);
   if (presetChanging) throw new Error("Saved tuning is being changed; try again in a moment");
+  if (isBusy() && run?.job.kind !== "bench") throw new Error("Another model operation is running; try again in a moment");
   presetChanging = true;
-  try {
-    return await changeNow(id, action, preset);
-  } finally {
-    presetChanging = false;
-  }
+  setBusy("A saved-tuning change");
+  try { return await exclusive(fn); }
+  finally { presetChanging = false; setBusy(run ? busyName[run.job.kind] : null); }
+}
+
+/** Trusted server modules only: callers supply fixed preset subcommands, never client-provided argv. */
+export async function presetCli(id: string, args: string[]): Promise<Record<string, any>> {
+  if (disposed) throw new Error("Plugin is unloading");
+  const f = await findModel(id);
+  return quick(await installFor(f), args.map((a) => a === "$target" ? f.config : a));
 }
 
 async function changeNow(id: string, action: "off" | "undo" | "apply" | "delete", preset?: string): Promise<PresetStatus> {
@@ -618,6 +657,8 @@ export async function startRecheck(id: string, preset: string) {
     const install = await installFor(f);
     const p = (await presetStatus(id)).presets.find((x) => x.id === preset);
     if (!p) throw new Error("That preset is not one of this model's");
+    const detail = await quick(install, ["presets", "show", preset, "--output", "json"]);
+    validateTuneOverrides(await smallJson(f.config), Object.keys(detail.preset?.settings?.args ?? {}));
     await mkdir(state(), { recursive: true, mode: 0o700 });
     await rm(status, { force: true });
     if (r.cancel) return void Object.assign(job, { state: "cancelled", outcome: "Cancelled before anything started" });

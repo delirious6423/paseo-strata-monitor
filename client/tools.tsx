@@ -6,6 +6,10 @@ import { Pressable, Text, View } from "react-native";
 import type { Engine } from "../shared/control";
 import { type Job, strataBench, strataCancel, strataRollback, strataTools, strataTune, strataUpdate, strataUpdateCheck } from "../shared/tools";
 import { Presets } from "./extras";
+import { ModelConfig } from "./model-config";
+import { PresetAdmin } from "./preset-admin";
+import { benchOptionsSchema, tuneOptionsSchema } from "../shared/options";
+import { BenchSettings, TuneSettings } from "./tool-options";
 import type { Styles } from "./monitor";
 
 const KIND = { bench: "Benchmark", tune: "Autotune", update: "Update", recheck: "Re-check", rollback: "Undo update", idle: "Idle stop" } as const;
@@ -41,11 +45,19 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
 
   // A second press confirms the long or disruptive actions; the question goes away after 6 s, or when another
   // model is selected (a confirmed Autotune must be for the model it was asked about).
+  const [tuneMode, setTuneMode] = useState<"quick" | "thorough">("quick");
+  const [tuneOptions, setTuneOptions] = useState(() => tuneOptionsSchema.parse({}));
+  const [benchOptions, setBenchOptions] = useState(() => benchOptionsSchema.parse({}));
+  const [expandedJobs, setExpandedJobs] = useState<Record<string, boolean>>({});
+  const tuneValidation = tuneOptionsSchema.safeParse(tuneOptions);
+  const benchValidation = benchOptionsSchema.safeParse(benchOptions);
+  const tuneKey = `tune:${sel.id}:${tuneMode}:${JSON.stringify(tuneOptions)}`;
+  const benchKey = `bench:${sel.id}:${JSON.stringify(benchOptions)}`;
   const [asked, setConfirm] = useState<string | null>(null);
-  const confirm = asked === `tune:${sel.id}` ? "tune" : asked === "update" || asked === "rollback" ? asked : null;
+  const confirm = asked === tuneKey ? "tune" : asked === "update" || asked === "rollback" ? asked : null;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ask = (kind: "tune" | "update" | "rollback", run: () => void) => {
-    const what = kind === "tune" ? `tune:${sel.id}` : kind;
+  const ask = (kind: "tune" | "bench" | "update" | "rollback", run: () => void) => {
+    const what = kind === "tune" ? tuneKey : kind === "bench" ? benchKey : kind;
     if (asked === what) {
       setConfirm(null);
       run();
@@ -85,12 +97,33 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
   return (
     <View style={{ gap: 8, borderTopWidth: 1, borderTopColor: c.border, paddingTop: 10 }}>
       <Text style={[styles.label, { fontSize: 12 }]}>Tools · {sel.provider} {sel.quant}</Text>
+      <View accessibilityRole="radiogroup" accessibilityLabel="Autotune depth" style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+        {(["quick", "thorough"] as const).map((mode) => (
+          <Pressable key={mode} accessibilityRole="radio" accessibilityState={{ checked: tuneMode === mode, disabled: busy }}
+            accessibilityLabel={mode === "quick" ? "Quick autotune" : "Thorough autotune"} disabled={busy}
+            onPress={() => { setTuneMode(mode); setConfirm(null); }}
+            style={{ paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1,
+              opacity: busy ? 0.45 : 1, borderColor: tuneMode === mode ? c.accent : c.border,
+              backgroundColor: tuneMode === mode ? c.surface2 : "transparent" }}>
+            <Text style={{ color: c.foreground, fontSize: 14 }}>{mode === "quick" ? "Quick · up to 20 min" : "Thorough · up to 2 h"}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <Text style={styles.label}>
+        {tuneMode === "quick" ? "Quick tests a smaller set of settings." : "Thorough also tests settings such as CPU workers and memory allocation, with more repeated comparisons."}
+        {" "}{tuneOptions.allowSmallDifferences || tuneOptions.allowNotRepeatable ? "Answer differences are enabled in tuning options." : "Answer differences are off."} No gain means no faster settings found in this search, not proof of optimality.
+      </Text>
+      <TuneSettings theme={theme} disabled={busy} value={tuneOptions} onChange={setTuneOptions} />
+      <BenchSettings theme={theme} disabled={busy} value={benchOptions} onChange={setBenchOptions} />
+      {!tuneValidation.success ? <Text style={{ color: c.statusDanger }}>{tuneValidation.error.issues[0]?.message}</Text> : null}
+      {!benchValidation.success ? <Text style={{ color: c.statusDanger }}>{benchValidation.error.issues[0]?.message}</Text> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        {button("Benchmark", () => act.mutate(() => bench({ id: sel.id })), { disabled: busy || sel.state !== "ready" })}
+        {button(asked === benchKey ? `Press again: run ${benchOptions.suite}` : `Benchmark · ${benchOptions.suite}`,
+          () => ask("bench", () => act.mutate(() => bench({ id: sel.id, options: benchOptions }))), { disabled: busy || sel.state !== "ready" || !benchValidation.success })}
         {button(confirm === "tune"
-          ? `Press again: ~20 min${sel.state === "ready" ? ", restarts the model, speed before/after" : ", stops the running model"}${sel.keepsTuning === false ? ", result not kept" : ""}`
-          : "Autotune",
-          () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: "quick" }))), { disabled: busy, warn: confirm === "tune" })}
+          ? `Press again: ${tuneOptions.minutes !== null ? `up to ${tuneOptions.minutes} min` : tuneMode === "quick" ? "up to 20 min" : "up to 2 h"}${tuneOptions.allowSmallDifferences || tuneOptions.allowNotRepeatable ? ", answers may change" : ""}${sel.state === "ready" ? tuneOptions.save ? ", restarts the model, speed before/after" : ", restarts with previous settings, no before/after comparison" : ", stops the running model"}${sel.keepsTuning === false ? ", result not kept" : ""}`
+          : `Autotune ${tuneMode}`,
+          () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: tuneMode, options: tuneOptions }))), { disabled: busy || !tuneValidation.success, warn: confirm === "tune" })}
         {button(checking.isPending ? "Checking…" : "Check for updates", () => checking.mutate(), { disabled: busy || checking.isPending })}
       </View>
       {sel.keepsTuning === false ? (
@@ -106,7 +139,9 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
         <Text style={{ color: c.statusDanger, fontSize: 12 }}>{(act.error ?? checking.error)?.message}</Text>
       ) : null}
 
-      <Presets theme={theme} styles={styles} sel={sel} busy={!!running} />
+      <ModelConfig theme={theme} styles={styles} sel={sel} busy={busy} />
+      <Presets theme={theme} styles={styles} sel={sel} busy={busy} mutationBusy={act.isPending || (!!running && running.kind !== "bench")} />
+      <PresetAdmin key={sel.id} theme={theme} styles={styles} sel={sel} busy={act.isPending || (!!running && running.kind !== "bench")} />
 
       {running ? <Running job={running} theme={theme} styles={styles} onCancel={() => act.mutate(() => cancel({}))} /> : null}
 
@@ -147,11 +182,13 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
           <Text numberOfLines={4} style={{ color: j.state === "failed" ? c.statusDanger : c.foreground, fontSize: 13 }}>
             {j.state === "failed" ? `Failed: ${j.error}` : j.outcome}
           </Text>
-          {j.details.map((d, i) => (
-            <Text key={i} style={[styles.label, { fontSize: 12 }]}>
-              {d}
-            </Text>
-          ))}
+          {j.details.length ? <Pressable accessibilityRole="button" accessibilityState={{ expanded: !!expandedJobs[j.id] }}
+            onPress={() => setExpandedJobs((v) => ({ ...v, [j.id]: !v[j.id] }))}>
+            <Text style={{ color: c.accent, fontSize: 14 }}>{expandedJobs[j.id] ? "Hide" : "Show"} details ({j.details.length})</Text>
+          </Pressable> : null}
+          {expandedJobs[j.id] ? j.details.map((d, i) => (
+            <Text key={i} selectable style={[styles.label, { fontSize: 12 }]}>{d}</Text>
+          )) : null}
         </View>
       ))}
     </View>

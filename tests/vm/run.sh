@@ -14,6 +14,10 @@ OUT=$(mktemp -d)
 "$ROOT/node_modules/.bin/esbuild" "$ROOT/tests/vm/e2e.ts" --bundle --platform=node --format=esm --target=node20 \
     --outfile="$OUT/e2e.mjs" --log-level=warning
 cp -r "$ROOT/tests/vm/fake-strata" "$OUT/"
+"$ROOT/node_modules/.bin/esbuild" "$ROOT"/server/*.test.ts --bundle --platform=node --format=esm --target=node20 \
+    --outdir="$OUT/unit" --out-extension:.js=.mjs --log-level=warning
+mkdir -p "$OUT/tests/vm"
+cp -r "$ROOT/tests/vm/fake-strata" "$OUT/tests/vm/"
 
 cleanup() {
     local rc=$?

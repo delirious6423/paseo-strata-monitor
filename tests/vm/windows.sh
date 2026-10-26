@@ -33,6 +33,10 @@ OUT=$(mktemp -d)
 "$ROOT/node_modules/.bin/esbuild" "$ROOT/tests/vm/e2e.ts" --bundle --platform=node --format=esm --target=node20 \
     --outfile="$OUT/vm-test/e2e.mjs" --log-level=warning
 cp -r "$ROOT/tests/vm/fake-strata" "$OUT/vm-test/"
+"$ROOT/node_modules/.bin/esbuild" "$ROOT"/server/*.test.ts --bundle --platform=node --format=esm --target=node20 \
+    --outdir="$OUT/vm-test/unit" --out-extension:.js=.mjs --log-level=warning
+mkdir -p "$OUT/vm-test/tests/vm"
+cp -r "$ROOT/tests/vm/fake-strata" "$OUT/vm-test/tests/vm/"
 tar -C "$OUT" -cf "$OUT/vm-test.tar" vm-test
 
 OWNED=0
@@ -63,5 +67,8 @@ tar -xf "$HOME\vm-test.tar" -C "$HOME"
 $env:Path = "$HOME\node-'"$NODE"'-win-'"$ARCH"';" + $env:Path
 "Windows " + [Environment]::OSVersion.Version + ", " + $env:PROCESSOR_ARCHITECTURE + ", node " + (node --version)
 Set-Location "$HOME\vm-test"
+$units = @(Get-ChildItem unit\*.test.mjs | ForEach-Object FullName)
+node --test @units
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 node e2e.mjs
 exit $LASTEXITCODE' | tr -d '\r'

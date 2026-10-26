@@ -6,18 +6,21 @@ the Strata models on your machine, load or stop one with a click, and watch the 
 - **Model picker**: every Strata model found on the machine, grouped by quant provider (and by model family when
   there are several), smallest first. Load, Abort while loading, Stop; loading one model stops the other first. One load or stop runs at a time, even
   with several Paseo clients, and a Strata server the plugin did not start blocks Load until you stop it.
-- **Tools** for the selected model, through Strata's own command-line tool: **Benchmark** (Strata's quick
-  serving check of the running model: tok/s, time to first token, alone and 4 at once), **Autotune** (finds the
-  fastest settings for this PC, about 20 minutes, and saves them as a preset the server uses at every start; a
-  running model is measured before, started again and measured after, so you see what changed; after Cancel it
-  shows whether a preset was saved) and **Check for updates / Install update / Undo update** (engine and control
-  from Strata's signed feed, and back to the engine version the last update kept). One tool at a time; Load
-  waits until it ends.
+- **Tools** through Strata's own CLI: **Benchmark** with six suites and suite-specific controls;
+  **Autotune** with Quick/Thorough depth, chat/coding workload, speed/room/reserve objectives, custom budget,
+  RAM reserve, preset name and measurement-only mode. Answer-changing and nonrepeatable settings require
+  explicit opt-in. Saved tuning of a running model gets before/after benchmarks; measurement-only tuning
+  restores its previous settings without comparison benchmarks. **Check for updates / Install update /
+  Undo update** use Strata's signed feed. Disruptive operations require confirmation; one tool runs at a time.
 - **Saved tuning** for the selected model: which preset it starts with and whether it is still valid for this PC
   and engine; use another, switch off, undo, delete, or **Re-check** (Strata's 2-minute check that a preset is
-  still as fast). A warning replaces it for a model whose server does not apply presets.
-- **Server log**: the last lines of the selected model's journal or Strata runtime log; opens by itself when a
-  load fails.
+  still as fast). Inspect evidence, rename, export JSON, import an inactive matching preset, and inspect effective
+  tuning for the next start. A warning replaces it for a model whose server does not apply presets.
+- **Model configuration**: 30 guided controls plus advanced JSON. Save only with all detected models stopped;
+  stale revisions and unknown status probes are refused and the previous file is backed up. Saving never
+  starts or restarts a model. Old plugin backups are archived by default; deleting older ones requires explicit
+  consent for that save and keeps the newest 10 total.
+- **Server log and job details**: collapsed by default, including failures. Expand only when needed.
 - **Idle stop** (Settings, off by default): stop a model after 15, 30, 60 or 120 minutes without requests, to
   free the GPU.
 - **Live status**: an always-visible sidebar row with prefill and decode tok/s, and a screen with a speed graph,
@@ -65,10 +68,11 @@ Each uses Strata's command-line tool: the model's own install's when it has one,
 that has one, else `strata` on PATH (systemd-run models record no install, so they get the first one). One tool
 runs at a time; Load, and Saved tuning changes, wait until it ends.
 
-- Benchmark: `strata bench run --url <the model's server> --suite serving-smoke --out <new folder>`; reports go to
+- Benchmark: `strata bench run --url <the model's server> --suite <selected suite> --out <new folder>`;
+  serving-smoke is the default. Prompts/token lengths come from the suite, not custom inputs. Reports go to
   the plugin's folder (`~/.local/state/paseo-strata/bench`, macOS `~/Library/Application Support/paseo-strata`,
   Windows `%LOCALAPPDATA%\paseo-strata`).
-- Autotune: `strata tune auto <run config> --mode quick --status-file …`. Undo a saved preset with
+- Autotune: `strata tune auto <run config> --mode quick|thorough --status-file …`. The screen shows skipped settings; no winner means no faster setting found in that search, not proof of optimality. Available controls and deliberate exclusions: [dashboard coverage](docs/dashboard-coverage.md). Undo a saved preset with
   `strata presets undo` or `strata presets off`. The result is remembered: Strata's server applies the saved preset
   at every start (its log says `saved tuning '…' applied`), so autotune once per model, and again after a new
   engine, driver or GPU. Only a server with Strata's preset support applies them (`apply_saved_tuning` in its `serve/server.py`); for a model whose server lacks it, the screen warns that a result would not be used.
@@ -108,10 +112,21 @@ shows the sidebar row or the Strata screen.
 ## Limits
 
 - The before/after speed is a rough check (the same quick benchmark a few minutes apart, not a controlled test).
-- Every autotune saves a preset, also when nothing changed; delete extras under Saved tuning.
+- Saving is enabled by default; measurement-only tuning saves/applies nothing. A saved objective must match
+  the model's resource profile; switch profile in Model configuration or choose measurement only.
+- Configuration editing refuses recognized credential-bearing files and nonloopback bindings. Backups preserve
+  the previous document; advanced JSON can change engine behavior and must be reviewed before saving.
+- Preset JSON import allows supported tuning settings only; unsupported flags/env are rejected rather than
+  silently discarded. Export redacts recognized credentials; inspect it before sharing.
 - Idle stop needs the model's own server to answer `/metrics`; a model it cannot read is never stopped.
 - Saved tuning changes are serialized within the plugin, not against the Strata app changing presets at the
-  same moment.
+  same moment. Preset bookkeeping is allowed during benchmarks; a queued mutation can delay Stop by up to
+  four 60-second CLI calls.
+- Guided engine edits are deliberate overrides. Autotune and Re-check refuse pinned candidate settings;
+  the effective-settings panel reports actual overrides after saved tuning. Reset the field to Default or
+  review Advanced JSON to unpin it. A resource profile only selects a saved-tuning slot, not a memory budget.
+- Unknown model status offers Stop/recover, not a successful no-op Load. Failed status collection is never
+  evidence that configuration writing is safe.
 
 - "A Strata server the plugin did not start" means a local listener owned by a Strata server process
   (`serve/server.py`) whose `/health` answers. One that is still loading, or listening only on a LAN address,
@@ -136,10 +151,10 @@ servers on this machine or URLs you added. A saved connection never falls back t
 ```bash
 npm install
 npm run typecheck
-npm test
+bash tests/vm/run.sh
 ```
 
-Cross-platform end-to-end checks in throwaway VMs: [TESTING.md](TESTING.md).
+Unit, integration and browser checks in throwaway VMs: [TESTING.md](TESTING.md).
 
 ![The Strata screen in Paseo: model picker grouped by provider, a loaded model and its live speed](assets/screenshot.png)
 

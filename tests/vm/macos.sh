@@ -26,6 +26,10 @@ OUT=$(mktemp -d)
 "$ROOT/node_modules/.bin/esbuild" "$ROOT/tests/vm/e2e.ts" --bundle --platform=node --format=esm --target=node20 \
     --outfile="$OUT/vm-test/e2e.mjs" --log-level=warning
 cp -r "$ROOT/tests/vm/fake-strata" "$OUT/vm-test/"
+"$ROOT/node_modules/.bin/esbuild" "$ROOT"/server/*.test.ts --bundle --platform=node --format=esm --target=node20 \
+    --outdir="$OUT/vm-test/unit" --out-extension:.js=.mjs --log-level=warning
+mkdir -p "$OUT/vm-test/tests/vm"
+cp -r "$ROOT/tests/vm/fake-strata" "$OUT/vm-test/tests/vm/"
 
 OWNED=0
 cleanup() {
@@ -41,5 +45,12 @@ OWNED=1   # from here on this run owns $NAME (run.sh refuses an existing one)
 vm_ssh 'cat > node.tar' < "$TGZ"
 tar -C "$OUT" -cf - vm-test | vm_ssh 'tar -xf -'
 vm_ssh 'set -e; tar -xf node.tar; export PATH="$HOME/node-'"$NODE-$PLATFORM"'/bin:$PATH"
-echo "$(uname -s) $(uname -r), $(uname -m), node $(node --version)"
-cd vm-test && node e2e.mjs'
+echo "$(uname -s) $(uname -r), $(uname -m), node $(node --version), arch $(node -p process.arch)"
+[ "$(node -p process.arch)" = arm64 ]
+file "$(command -v node)"
+if [ "$(uname -s)" = Linux ]; then
+    export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+fi
+cd vm-test
+node --test unit/*.test.mjs
+node e2e.mjs'

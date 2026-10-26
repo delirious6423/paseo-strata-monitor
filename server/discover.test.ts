@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { groupEngines } from "../shared/group.ts";
 import { parseShow } from "./control.ts";
@@ -107,7 +107,7 @@ test("STRATA_INSTALL_DIR is the only install looked at, like Strata", async () =
   assert.deepEqual((await discover(o)).models.map((m) => bare(m.id)), ["cfg:two"]);
 });
 
-test("systemd: template and plain units are adopted; non-Strata units ignored; no duplicates", async () => {
+test("systemd: template and plain units are adopted; non-Strata units ignored; no duplicates", { skip: process.platform === "darwin" && "systemd discovery is intentionally disabled on macOS" }, async () => {
   const { home, o } = machine();
   const inst = join(home, "Strata");
   install(inst, { iq3_s: { file: "Q-IQ3_S.gguf", meta: [["general.quantized_by", 8, "Alpha"]] } });
@@ -182,7 +182,7 @@ test("picker: smallest first, grouped by provider, families kept together", () =
 test("parsers: ExecStart, scripts, front matter, HF paths, systemctl", () => {
   assert.deepEqual(splitExec(`-/bin/sh -c 'a b' "c d" e`), ["/bin/sh", "-c", "a b", "c d", "e"]);
   assert.equal(configFromScript(`B=/x\nexec py --config="$B/c.json"`, "/"), "/x/c.json");
-  assert.equal(configFromScript(`cd /w\nexec py --config rel.json`, "/"), "/w/rel.json");
+  assert.equal(configFromScript(`cd /w\nexec py --config rel.json`, "/"), resolve("/w", "rel.json"));
   assert.equal(configFromScript(`echo hi`, "/"), null);
   assert.equal(configFromScript(`exec py --config "$HOME/llm/a.json"`, "/", { HOME: "/home/u" }), "/home/u/llm/a.json");
   assert.deepEqual(frontMatter("---\nquantized_by: \"sc\"\nbase_model: Q/F\n---\nbody"), { quantized_by: "sc", base_model: "Q/F" });
@@ -280,10 +280,10 @@ test("EXL3 bits from the head of a quantization_config.json far larger than the 
   assert.equal(m?.quant, "EXL3 2.66 bpw h6");
 });
 
-test("server file from a start script, and whether that server keeps an autotune result", async () => {
-  assert.equal(serverFromScript(`B=/x\ncd "$B/source"\nexec "$B/py" -m serve.server --config c.json`, "/"), "/x/source/serve/server.py");
-  assert.equal(serverFromScript(`cd /w\nexec "/s/.venv/bin/python" "/s/serve/server.py" --config c.json`, "/"), "/s/serve/server.py");
-  assert.equal(serverFromScript(`# cd /old\nexec python serve/server.py`, "/d"), "/d/serve/server.py");
+test("server file from a start script, and whether that server keeps an autotune result", { skip: process.platform === "darwin" && "fixture uses systemd, unavailable on macOS" }, async () => {
+  assert.equal(serverFromScript(`B=/x\ncd "$B/source"\nexec "$B/py" -m serve.server --config c.json`, "/"), resolve("/x/source/serve/server.py"));
+  assert.equal(serverFromScript(`cd /w\nexec "/s/.venv/bin/python" "/s/serve/server.py" --config c.json`, "/"), resolve("/s/serve/server.py"));
+  assert.equal(serverFromScript(`# cd /old\nexec python serve/server.py`, "/d"), resolve("/d/serve/server.py"));
   assert.equal(serverFromScript(`exec llama-server -m x.gguf`, "/"), null);
   const { home, o } = machine();
   const units = join(home, ".config/systemd/user");

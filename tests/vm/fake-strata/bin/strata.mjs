@@ -1,6 +1,7 @@
 // Stand-in for Strata's CLI in the VM tests: the `profile` and `runtime` subcommands the plugin calls, with
 // the same `--output json` shapes as Strata (strata_control/runtime.py). Node only, so it runs on every OS.
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,6 +15,7 @@ const PROFILES = process.env.STRATA_PROFILE_DIR || (win ? join(roaming, "Strata"
 const STATE = process.env.STRATA_RUNTIME_DIR || (win ? join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "Strata", "runtime")
   : join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "strata", "runtime"));
 const a = process.argv.slice(2);
+if (a[0] === "bench" || a[0] === "tune") writeFileSync(join(homedir(), `.fake-strata-${a[0]}-args`), JSON.stringify(a));
 const arg = (n) => (a.includes(n) ? a[a.indexOf(n) + 1] : null);
 const out = (o, code = 0) => {
   process.stdout.write(JSON.stringify({ schema_version: 1, ...o }) + "\n");
@@ -29,12 +31,25 @@ const alive = (pid) => {
 };
 const answers = async (port) => fetch(`http://127.0.0.1:${port}/`).then(() => true, () => false);
 
+// Mirror upstream CLI admission rules: fixtures must reject invalid contracts, not merely echo argv.
+if (a[0] === "bench" && a[1] === "run") {
+  if (a.includes("--require-managed-match") && !arg("--profile")) out({ ok: false, error: "--require-managed-match needs a saved --profile" }, 2);
+  if (arg("--condition") !== null && !/^[a-z][a-z0-9_-]{0,39}$/.test(arg("--condition"))) out({ ok: false, error: "benchmark condition must be a lowercase name up to 40 characters" }, 2);
+  const count = join(homedir(), ".fake-strata-bench-count");
+  writeFileSync(count, String(Number(existsSync(count) ? readFileSync(count, "utf8") : 0) + 1));
+}
+if ((a[0] === "presets" && a[1] === "rename") || (a[0] === "tune" && arg("--name") !== null)) {
+  const name = a[0] === "presets" ? a.at(-1) : arg("--name");
+  if (!name?.trim() || name.trim().length > 80 || /[\r\n\0]/.test(name)) out({ ok: false, error: "choose a name of 1 to 80 characters" }, 2);
+}
+
 if (a[0] === "profile" && (a[1] === "create" || a[1] === "use-config")) {
   mkdirSync(PROFILES, { recursive: true });
   writeFileSync(join(PROFILES, `${a[2]}.json`), JSON.stringify({ id: a[2], overrides: {}, schema_version: 1, source_config: arg("--from-config") }));
   out({ ok: true, profile: { id: a[2], source_config: arg("--from-config") } });
 }
 if (a[0] === "runtime") {
+  if (a[1] === "status" && existsSync(join(homedir(), ".fake-strata-runtime-status-fails"))) out({ ok: false, error: "fixture status unavailable" }, 2);
   const name = arg("--profile");
   const pidfile = join(STATE, `${name}.pid`);
   const [pid, port] = existsSync(pidfile) ? readFileSync(pidfile, "utf8").split(" ").map(Number) : [0, 0];
@@ -75,6 +90,25 @@ const savePresets = (list) => {
   writeFileSync(UNDO, JSON.stringify(presets())); // one step of undo, like Strata's per-slot history
   writeFileSync(PRESETS, JSON.stringify(list));
 };
+if (a[0] === "presets" && ["show", "rename", "effective", "import"].includes(a[1])) {
+  if (a[1] === "import") {
+    const data = JSON.parse(readFileSync(a[2], "utf8"));
+    const p = { ...data, id: randomUUID().replaceAll("-", ""), active: false };
+    savePresets([...presets(), p]);
+    out({ ok: true, preset: p });
+  }
+  if (a[1] === "effective") {
+    const p = presets().find(p => p.active);
+    out({ ok: true, applied: !!p, preset: p ? { id: p.id, name: p.name } : null, state: p ? "fresh" : null,
+      args: ["--pool-workers", "4"], env: {}, per_request: {}, changed: [] });
+  }
+  const p = presets().find(p => p.id === a[2]);
+  if (!p) out({ ok: false, error: { message: "no preset" } }, 5);
+  if (a[1] === "rename") {
+    p.name = a.at(-1); savePresets(presets().map(x => x.id === p.id ? p : x));
+  }
+  out({ ok: true, preset: p });
+}
 if (a[0] === "presets" && a[1] === "list") out({ ok: true, presets: presets() });
 // One slot for every config here (Strata keys slots by model and settings; the tests use one model).
 if (a[0] === "presets" && a[1] === "status") {
@@ -123,6 +157,7 @@ if (a[0] === "bench" && a[1] === "run") {
     { kind: "mixed", client_workers: 4, output_tok_s: 120.4, p50_ttft_s: 0.6, p50_latency_s: 3.3, failed: 0 }] } });
 }
 if (a[0] === "tune" && a[1] === "auto") {
+  writeFileSync(join(homedir(), ".fake-strata-tune-mode"), arg("--mode"));
   const status = arg("--status-file");
   // A tune that fails (Strata exits 6, e.g. the engine under test would not start), when the test asks for one.
   if (existsSync(join(homedir(), ".fake-strata-tune-fails"))) out({ ok: true, result: { outcome: "failed", message: "the engine under test did not start" } }, 6);
@@ -137,9 +172,10 @@ if (a[0] === "tune" && a[1] === "auto") {
       out({ ok: true, result }, 130);
     }
   }
-  const preset = { id: `p${Date.now()}`, name: `fake 64K – Full speed ${presets().length + 1}`, active: true };
-  writeFileSync(PRESETS, JSON.stringify([...presets(), preset]));
-  const result = { outcome: "improved", message: "8% faster than your settings.", preset: { id: preset.id, name: preset.name } };
+  const preset = { schema: "strata.preset/1", id: randomUUID().replaceAll("-", ""), name: arg("--name") || `fake 64K – Full speed ${presets().length + 1}`, active: true,
+    slot: "s1", choices: { context: 65536 }, created_epoch: Date.now() / 1000, answers: { class: "exact" }, identity: {}, settings: { args: { "--pool-workers": "4" }, env: {}, per_request: {} }, evidence: { trials: [] } };
+  if (!a.includes("--no-save")) writeFileSync(PRESETS, JSON.stringify([...presets(), preset]));
+  const result = { outcome: "improved", message: "8% faster than your settings.", preset: a.includes("--no-save") ? null : { id: preset.id, name: preset.name } };
   writeFileSync(status, JSON.stringify({ state: "done", result }));
   out({ ok: true, result });
 }

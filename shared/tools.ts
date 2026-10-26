@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { benchOptionsSchema, tuneOptionsSchema } from "./options";
 
 // Strata's own maintenance tools, run through its command-line tool: a serving benchmark of the running model,
 // autotune (finds the fastest settings and saves them as a preset), the saved presets themselves, and engine
@@ -44,12 +45,12 @@ export const strataTools = defineRpc({
 });
 
 /** Benchmark the running model (Strata's serving-smoke suite: a few real requests, about a minute). */
-export const strataBench = defineRpc({ name: "strata.bench", input: z.object({ id: z.string() }), output: z.object({ ok: z.literal(true) }) });
+export const strataBench = defineRpc({ name: "strata.bench", input: z.object({ id: z.string(), options: benchOptionsSchema.optional() }), output: z.object({ ok: z.literal(true) }) });
 
 /** Autotune a model; stops whatever runs first (it needs the whole GPU). quick ≈ 20 min, thorough ≤ 2 h. */
 export const strataTune = defineRpc({
   name: "strata.tune",
-  input: z.object({ id: z.string(), mode: z.enum(["quick", "thorough"]) }),
+  input: z.object({ id: z.string(), mode: z.enum(["quick", "thorough"]), options: tuneOptionsSchema.optional() }),
   output: z.object({ ok: z.literal(true) }),
 });
 
