@@ -57,7 +57,7 @@ export function TuneSettings({ value: o, onChange, theme, disabled }: {
   return <OptionSection title="tuning options" theme={theme}>
     <Choices {...common} label="Tuning workload" value={o.use} values={["chat", "coding"]} onChange={(v) => set("use", v)} />
     <Choices {...common} label="Tuning objective" value={o.goal} values={["speed", "room", "reserve"]} onChange={(v) => set("goal", v)} />
-    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Speed maximizes performance. Room leaves memory free; reserve specifies a graphics memory budget. Saved room tuning requires Model configuration → Resource profile = work; saved speed tuning requires full. A RAM reserve also selects room. Mismatches are rejected before tuning; measurement only can use either.</Text>
+    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Speed maximizes performance. Room leaves memory free; reserve specifies a graphics memory budget. Saved room tuning requires Model configuration → Resource profile = work; saved speed tuning requires full. A RAM reserve also selects room. A mismatch with the selected model is shown below and blocks Autotune; measurement only can use either.</Text>
     {o.goal === "reserve" ? <Field {...common} numeric label="Graphics memory to leave free (MiB)" value={String(o.reserveMiB)} onChange={(v) => set("reserveMiB", Number(v))} /> : null}
     <Field {...common} numeric label="System RAM to leave free (0–50%)" value={String(o.leaveRam)} onChange={(v) => set("leaveRam", Number(v))} />
     <Toggle {...common} label="Allow small answer differences" value={o.allowSmallDifferences} onChange={(v) => set("allowSmallDifferences", v)} />

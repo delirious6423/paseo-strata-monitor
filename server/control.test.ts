@@ -76,3 +76,14 @@ test("systemd: failed status collection is unknown and refuses configuration sav
     assert.equal(readFileSync(join(home, "m.json"), "utf8"), original);
   } finally { rmSync(join(home, "status-fails")); }
 });
+
+test("the listing reads the Resource profile fresh, so a configuration change shows without a rescan", { skip: !linux }, async () => {
+  setup();
+  const original = readFileSync(join(home, "m.json"), "utf8");
+  try {
+    assert.equal((await listEngines(true)).engines[0]?.resourceProfile, "full");
+    writeFileSync(join(home, "m.json"), JSON.stringify({ ...JSON.parse(original), ui_resource_profile: "work" }));
+    await settle(); // past the shared listing window
+    assert.equal((await listEngines()).engines[0]?.resourceProfile, "work");
+  } finally { writeFileSync(join(home, "m.json"), original); }
+});

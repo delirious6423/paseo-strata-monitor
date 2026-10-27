@@ -9,7 +9,7 @@ import { Presets } from "./extras";
 import { ModelConfig } from "./model-config";
 import { PresetAdmin } from "./preset-admin";
 import { Section } from "./section";
-import { benchOptionsSchema, tuneOptionsSchema } from "../shared/options";
+import { benchOptionsSchema, tuneGoalMismatch, tuneOptionsSchema } from "../shared/options";
 import { BenchSettings, TuneSettings } from "./tool-options";
 import type { Styles } from "./monitor";
 
@@ -52,6 +52,7 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
   const [expandedJobs, setExpandedJobs] = useState<Record<string, boolean>>({});
   const tuneValidation = tuneOptionsSchema.safeParse(tuneOptions);
   const benchValidation = benchOptionsSchema.safeParse(benchOptions);
+  const tuneMismatch = tuneValidation.success ? tuneGoalMismatch(sel.resourceProfile, tuneValidation.data) : null;
   const tuneKey = `tune:${sel.id}:${tuneMode}:${JSON.stringify(tuneOptions)}`;
   const benchKey = `bench:${sel.id}:${JSON.stringify(benchOptions)}`;
   const [asked, setConfirm] = useState<string | null>(null);
@@ -121,13 +122,14 @@ export function Tools({ theme, styles, sel }: { theme: PluginTheme; styles: Styl
       <BenchSettings theme={theme} disabled={busy} value={benchOptions} onChange={setBenchOptions} />
       {!tuneValidation.success ? <Text style={{ color: c.statusDanger }}>{tuneValidation.error.issues[0]?.message}</Text> : null}
       {!benchValidation.success ? <Text style={{ color: c.statusDanger }}>{benchValidation.error.issues[0]?.message}</Text> : null}
+      {tuneMismatch ? <Text style={{ color: c.statusWarning, fontSize: 14 }}>{tuneMismatch}</Text> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {button(asked === benchKey ? `Press again: run ${benchOptions.suite}` : `Benchmark · ${benchOptions.suite}`,
           () => ask("bench", () => act.mutate(() => bench({ id: sel.id, options: benchOptions }))), { disabled: busy || sel.state !== "ready" || !benchValidation.success })}
         {button(confirm === "tune"
           ? `Press again: ${tuneOptions.minutes !== null ? `up to ${tuneOptions.minutes} min` : tuneMode === "quick" ? "up to 20 min" : "up to 2 h"}${tuneOptions.allowSmallDifferences || tuneOptions.allowNotRepeatable ? ", answers may change" : ""}${sel.state === "ready" ? tuneOptions.save ? ", restarts the model, speed before/after" : ", restarts with previous settings, no before/after comparison" : ", stops the running model"}${sel.keepsTuning === false ? ", result not kept" : ""}`
           : `Autotune ${tuneMode}`,
-          () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: tuneMode, options: tuneOptions }))), { disabled: busy || !tuneValidation.success, warn: confirm === "tune" })}
+          () => ask("tune", () => act.mutate(() => tune({ id: sel.id, mode: tuneMode, options: tuneOptions }))), { disabled: busy || !tuneValidation.success || tuneMismatch !== null, warn: confirm === "tune" })}
       </View>
       {sel.keepsTuning === false ? (
         <Text style={{ color: c.statusWarning, fontSize: 12 }}>

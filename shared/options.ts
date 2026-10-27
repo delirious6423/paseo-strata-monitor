@@ -36,10 +36,18 @@ export const benchOptionsSchema = z.object({
   { message: "Concurrency above 16 is only supported by the overload suite", path: ["concurrency"] });
 export type BenchOptions = z.infer<typeof benchOptionsSchema>;
 
-export function validateTuneGoal(config: Record<string, unknown>, o: TuneOptions): void {
+/** Why a saved tune would land in a slot Strata never starts with (null: fine). Strata saves reserve and RAM-reserve
+ * tunes as room, and picks the launch slot from ui_resource_profile (strata_control/presets.py choices_from_config). */
+export function tuneGoalMismatch(profile: unknown, o: TuneOptions): string | null {
   const wanted = o.goal !== "speed" || o.leaveRam > 0 ? "room" : "speed";
-  const launchGoal = config.ui_resource_profile === "work" ? "room" : "speed";
-  if (o.save && wanted !== launchGoal) throw new Error(`Saved tuning goal ${wanted} does not match this model's launch profile (${launchGoal}). Stop the model and set Model configuration → Resource profile to ${wanted === "room" ? "work" : "full"}, or disable Save for a measurement-only run. This avoids saving a preset that would never be applied.`);
+  const launchGoal = profile === "work" ? "room" : "speed";
+  if (!o.save || wanted === launchGoal) return null;
+  const why = o.goal === "reserve" ? "A reserve objective is saved as room tuning" : o.goal === "speed" && wanted === "room" ? "A RAM reserve makes this room tuning" : `This is ${wanted} tuning`;
+  return `${why}, but this model's Resource profile is ${launchGoal === "room" ? "work" : "full"}, so it starts with ${launchGoal} tuning and the preset would never be applied. Set Model configuration → Resource profile to ${wanted === "room" ? "work" : "full"} (model stopped), or turn off "Save the resulting preset" to only measure.`;
+}
+export function validateTuneGoal(config: Record<string, unknown>, o: TuneOptions): void {
+  const mismatch = tuneGoalMismatch(config.ui_resource_profile, o);
+  if (mismatch) throw new Error(mismatch);
 }
 
 // Installed tune_knobs.ARMS mutate these engine flags; runtime user_args would override the candidates.

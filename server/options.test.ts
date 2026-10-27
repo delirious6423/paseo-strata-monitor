@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { benchArgs, benchOptionsSchema, tuneArgs, tuneOptionsSchema, validateTuneGoal, validateTuneOverrides } from "../shared/options.ts";
+import { benchArgs, benchOptionsSchema, tuneArgs, tuneGoalMismatch, tuneOptionsSchema, validateTuneGoal, validateTuneOverrides } from "../shared/options.ts";
 
 test("tuning exposes both workloads, every objective and explicit answer permissions", () => {
   assert.deepEqual(tuneArgs("quick").slice(0, 6), ["--mode", "quick", "--use", "chat", "--goal", "speed"]);
@@ -21,8 +21,19 @@ test("saved objective must match the launch slot, measurement-only does not chan
   assert.throws(() => validateTuneOverrides({ args_written: ["--spec", "4"], args: [], user_args: ["--spec", "4"] }), /--spec/);
   assert.throws(() => validateTuneOverrides({ user_args: ["--mmap-experts"] }, ["--mmap-experts"]), /--mmap-experts/);
   validateTuneGoal({}, tuneOptionsSchema.parse({ goal: "reserve", reserveMiB: 512, save: false }));
-  assert.throws(() => validateTuneGoal({}, tuneOptionsSchema.parse({ leaveRam: 10 })), /launch profile/);
-  assert.throws(() => validateTuneGoal({ ui_resource_profile: "work" }, tuneOptionsSchema.parse({})), /launch profile/);
+  assert.throws(() => validateTuneGoal({}, tuneOptionsSchema.parse({ leaveRam: 10 })), /Resource profile is/);
+  assert.throws(() => validateTuneGoal({ ui_resource_profile: "work" }, tuneOptionsSchema.parse({})), /Resource profile is/);
+});
+
+test("a saved reserve tune on the full profile is flagged before it starts, with the fix", () => {
+  const reserve = tuneOptionsSchema.parse({ goal: "reserve", reserveMiB: 4096 });
+  assert.match(tuneGoalMismatch("full", reserve) ?? "", /reserve objective is saved as room.*Resource profile to work/);
+  assert.match(tuneGoalMismatch(undefined, reserve) ?? "", /Resource profile is full/);
+  assert.equal(tuneGoalMismatch("work", reserve), null);
+  assert.equal(tuneGoalMismatch("full", { ...reserve, save: false }), null);
+  assert.match(tuneGoalMismatch("full", tuneOptionsSchema.parse({ leaveRam: 10 })) ?? "", /RAM reserve/);
+  assert.match(tuneGoalMismatch("work", tuneOptionsSchema.parse({})) ?? "", /Resource profile to full/);
+  assert.throws(() => validateTuneGoal({}, reserve), /would never be applied/);
 });
 
 test("invalid tuning values and arbitrary options are rejected", () => {

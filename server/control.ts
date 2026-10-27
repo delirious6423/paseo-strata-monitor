@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import type { Engine } from "../shared/control";
 import { type Discovery, type Found, discover } from "./discover";
 import { recentListeners } from "./listeners";
+import { smallJson } from "./models";
 import { type Os, cliIn, here, profileDir } from "./places";
 import { expectServer, invalidateServers, strataHealth } from "./strata";
 
@@ -217,9 +218,11 @@ async function listNow(rescan: boolean): Promise<Listing> {
       }
       if (stopping.has(f.id)) state = "stopping"; // cleared when `runtime stop` returns
       if (stopErrors.has(f.id) && state !== "stopped") error = `Stop failed: ${stopErrors.get(f.id)}`;
+      // Read fresh, not from the cached discovery: Model configuration can change it between rescans.
+      const resourceProfile = (await smallJson(f.config)).ui_resource_profile === "work" ? "work" as const : "full" as const;
       return {
         id: f.id, name: f.name, family: f.family, provider: f.provider, quant: f.quant, format: f.format, sizeBytes: f.sizeBytes,
-        port: f.port, config: f.config, launcher: launcherLabel(f), source: f.source, keepsTuning: f.keepsTuning, state, sinceMs, error,
+        port: f.port, config: f.config, launcher: launcherLabel(f), source: f.source, keepsTuning: f.keepsTuning, resourceProfile, state, sinceMs, error,
       };
     }),
   );
